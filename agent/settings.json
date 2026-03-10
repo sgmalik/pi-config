@@ -3,5 +3,6 @@
     "npm:@aliou/pi-guardrails"
   ],
   "lastChangelogVersion": "0.57.1",
-  "theme": "synthwave"
+  "theme": "synthwave",
+  "defaultThinkingLevel": "medium"
 }
