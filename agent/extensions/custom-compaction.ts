@@ -38,6 +38,17 @@ export default function (pi: ExtensionAPI) {
 					timestamp: new Date(entry.timestamp).toLocaleTimeString(),
 				};
 			}
+			// Check for user edits to the compaction summary
+			if (entry.type === "custom" && entry.customType === "compaction-edit" && entry.data?.summary) {
+				const data = entry.data;
+				lastCompaction = {
+					summary: data.summary,
+					source: data.source ?? lastCompaction?.source ?? "unknown",
+					tokensBefore: data.tokensBefore ?? lastCompaction?.tokensBefore ?? "?",
+					summaryLength: data.summary.length,
+					timestamp: data.timestamp ?? lastCompaction?.timestamp ?? "?",
+				};
+			}
 		}
 	};
 
@@ -116,9 +127,11 @@ export default function (pi: ExtensionAPI) {
 
 			const fullContent = header + summary;
 
-			await ctx.ui.custom<void>(
+			// Result: undefined = closed, "edit" = user wants to edit
+			const action = await ctx.ui.custom<"edit" | undefined>(
 				(tui, theme, _kb, done) => {
-					const md = new Markdown(fullContent, 1, 1, getMarkdownTheme());
+					let currentContent = fullContent;
+					let md = new Markdown(currentContent, 1, 1, getMarkdownTheme());
 					let scrollOffset = 0;
 					let contentLines: string[] = [];
 					let cachedWidth: number | undefined;
@@ -133,6 +146,9 @@ export default function (pi: ExtensionAPI) {
 
 							if (matchesKey(data, Key.escape) || data === "q") {
 								done(undefined);
+								return;
+							} else if (data === "e") {
+								done("edit");
 								return;
 							} else if (matchesKey(data, Key.up) || data === "k") {
 								scrollOffset = Math.max(0, scrollOffset - 1);
@@ -194,7 +210,7 @@ export default function (pi: ExtensionAPI) {
 
 							// Scroll info row
 							const scrollInfo = `${pos} ${pct}`;
-							const scrollLeft = " ↑↓/j/k scroll · PgUp/PgDn · Home/End · q/Esc close";
+							const scrollLeft = " ↑↓/j/k · PgUp/PgDn · Home/End · e edit · q/Esc close";
 							const scrollPad = " ".repeat(Math.max(1, innerW - 2 - visibleWidth(scrollLeft) - visibleWidth(scrollInfo)));
 							const helpContent = theme.fg("dim", scrollLeft) + scrollPad + theme.fg("dim", scrollInfo);
 
@@ -231,6 +247,29 @@ export default function (pi: ExtensionAPI) {
 					},
 				},
 			);
+
+			// If user pressed 'e', open the editor with the raw summary
+			if (action === "edit") {
+				const edited = await ctx.ui.editor("Edit Compaction Summary", summary);
+
+				if (edited !== undefined && edited !== summary) {
+					// Update in-memory state
+					lastCompaction = { ...lastCompaction, summary: edited, summaryLength: edited.length };
+
+					// Persist the edit to the session so it survives resume
+					pi.appendEntry("compaction-edit", {
+						summary: edited,
+						source: lastCompaction.source,
+						tokensBefore: lastCompaction.tokensBefore,
+						timestamp: lastCompaction.timestamp,
+						editedAt: new Date().toISOString(),
+					});
+
+					ctx.ui.notify(`Compaction summary updated (${edited.length} chars)`, "info");
+				} else if (edited === undefined) {
+					ctx.ui.notify("Edit cancelled", "info");
+				}
+			}
 		},
 	});
 
