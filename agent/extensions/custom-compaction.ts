@@ -130,8 +130,10 @@ export default function (pi: ExtensionAPI) {
 						render(width: number): string[] {
 							if (cachedOutput && cachedWidth === width) return cachedOutput;
 
+							const innerW = Math.max(1, width - 2);
+
 							// Render full markdown
-							contentLines = md.render(width - 2);
+							contentLines = md.render(innerW - 2); // leave room for │ + space padding
 
 							// Clamp scroll
 							const maxScroll = Math.max(0, contentLines.length - VIEWPORT_HEIGHT);
@@ -144,23 +146,33 @@ export default function (pi: ExtensionAPI) {
 							const pos = `${scrollOffset + 1}-${Math.min(scrollOffset + VIEWPORT_HEIGHT, contentLines.length)}/${contentLines.length}`;
 							const pct = maxScroll > 0 ? `${Math.round((scrollOffset / maxScroll) * 100)}%` : "100%";
 
-							// Build output
-							const border = theme.fg("borderMuted", "─".repeat(width));
-							const titleLeft = theme.fg("accent", theme.bold(" Compaction Summary"));
-							const titleRight = theme.fg("dim", `${pos} ${pct} `);
-							const titlePad = " ".repeat(Math.max(1, width - visibleWidth(titleLeft) - visibleWidth(titleRight)));
-							const titleLine = truncateToWidth(titleLeft + titlePad + titleRight, width, "");
+							// Helper: wrap a content line in box borders with padding
+							const row = (content: string): string => {
+								return theme.fg("border", "│") + " " + truncateToWidth(content, innerW - 2, "...", true) + " " + theme.fg("border", "│");
+							};
 
-							const helpLine = theme.fg("dim", " ↑↓/j/k scroll · PgUp/PgDn · Home/End · q/Esc close");
+							// Title bar
+							const titleText = " Compaction Summary ";
+							const titleW = visibleWidth(titleText);
+							const leftDash = "─".repeat(Math.floor((innerW - titleW) / 2));
+							const rightDash = "─".repeat(Math.max(0, innerW - titleW - leftDash.length));
+							const topBorder = theme.fg("border", "╭" + leftDash) + theme.fg("accent", theme.bold(titleText)) + theme.fg("border", rightDash + "╮");
+
+							// Scroll info row
+							const scrollInfo = `${pos} ${pct}`;
+							const scrollLeft = " ↑↓/j/k scroll · PgUp/PgDn · Home/End · q/Esc close";
+							const scrollPad = " ".repeat(Math.max(1, innerW - 2 - visibleWidth(scrollLeft) - visibleWidth(scrollInfo)));
+							const helpContent = theme.fg("dim", scrollLeft) + scrollPad + theme.fg("dim", scrollInfo);
+
+							// Bottom border
+							const bottomBorder = theme.fg("border", "╰" + "─".repeat(innerW) + "╯");
 
 							const output = [
-								border,
-								titleLine,
-								border,
-								...visible,
-								border,
-								helpLine,
-								border,
+								topBorder,
+								...visible.map(row),
+								theme.fg("border", "├" + "─".repeat(innerW) + "┤"),
+								row(helpContent),
+								bottomBorder,
 							];
 
 							cachedWidth = width;
