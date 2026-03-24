@@ -1,0 +1,22 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "strict": true,
+    "noEmit": true,
+    "skipLibCheck": true,
+    "baseUrl": ".",
+    "typeRoots": [
+      "/opt/homebrew/lib/node_modules/@mariozechner/pi-coding-agent/node_modules/@types"
+    ],
+    "paths": {
+      "@mariozechner/pi-coding-agent": ["/opt/homebrew/lib/node_modules/@mariozechner/pi-coding-agent"],
+      "@mariozechner/pi-tui": ["/opt/homebrew/lib/node_modules/@mariozechner/pi-tui"],
+      "@mariozechner/pi-ai": ["/opt/homebrew/lib/node_modules/@mariozechner/pi-ai"],
+      "@mariozechner/pi-agent-core": ["/opt/homebrew/lib/node_modules/@mariozechner/pi-agent-core"],
+      "@sinclair/typebox": ["/opt/homebrew/lib/node_modules/@mariozechner/pi-coding-agent/node_modules/@sinclair/typebox"]
+    }
+  },
+  "include": ["extensions/**/*.ts"]
+}
