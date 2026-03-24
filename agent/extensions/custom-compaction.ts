@@ -22,6 +22,40 @@ import { Container, Key, Markdown, matchesKey, Text, truncateToWidth, visibleWid
 let lastCompaction: { summary: string; source: string; tokensBefore: string; summaryLength: number; timestamp: string } | undefined;
 
 export default function (pi: ExtensionAPI) {
+	// Restore last compaction from session entries on startup/resume
+	const restoreCompaction = (entries: any[]) => {
+		lastCompaction = undefined;
+		// Scan for the last compaction entry (built into the session format, type: "compaction")
+		for (const entry of entries) {
+			if (entry.type === "compaction" && entry.summary) {
+				const source = entry.fromHook ? "custom (Bedrock Haiku)" : "built-in";
+				const tokensBefore = typeof entry.tokensBefore === "number" ? entry.tokensBefore.toLocaleString() : String(entry.tokensBefore);
+				lastCompaction = {
+					summary: entry.summary,
+					source,
+					tokensBefore,
+					summaryLength: entry.summary.length,
+					timestamp: new Date(entry.timestamp).toLocaleTimeString(),
+				};
+			}
+		}
+	};
+
+	const restoreAndNotify = async (_event: any, ctx: any) => {
+		restoreCompaction(ctx.sessionManager.getEntries());
+		if (lastCompaction && ctx.hasUI) {
+			ctx.ui.notify(
+				`Previous compaction available (${lastCompaction.tokensBefore} tokens → ${lastCompaction.summaryLength} chars). Use /compaction to view.`,
+				"info",
+			);
+		}
+	};
+
+	pi.on("session_start", restoreAndNotify);
+	pi.on("session_switch", restoreAndNotify);
+	pi.on("session_fork", restoreAndNotify);
+	pi.on("session_tree", restoreAndNotify);
+
 	// Post-compaction: show compact stats widget + store full summary for /compaction
 	pi.on("session_compact", (event, ctx) => {
 		if (!ctx.hasUI) return;
@@ -223,6 +257,11 @@ export default function (pi: ExtensionAPI) {
 
 		// Combine all messages for full summary
 		const allMessages = [...messagesToSummarize, ...turnPrefixMessages];
+
+		if (allMessages.length === 0) {
+			ctx.ui.notify("Nothing to compact — all messages fit within the keep-recent threshold.", "info");
+			return { cancel: true };
+		}
 
 		ctx.ui.notify(
 			`Custom compaction: summarizing ${allMessages.length} messages (${tokensBefore.toLocaleString()} tokens) with AWS Bedrock Haiku...`,
