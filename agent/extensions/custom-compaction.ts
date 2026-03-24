@@ -6,35 +6,206 @@
  * 1. Summarizes ALL messages (messagesToSummarize + turnPrefixMessages)
  * 2. Discards all old turns completely, keeping only the summary
  *
- * This example also demonstrates using a different model (Gemini Flash) for summarization,
+ * This example also demonstrates using a different model (AWS Bedrock Haiku) for summarization,
  * which can be cheaper/faster than the main conversation model.
  *
  * Usage:
- *   pi --extension examples/extensions/custom-compaction.ts
+ *   pi --extension ~/.pi/agent/extensions/custom-compaction.ts
  */
 
 import { complete } from "@mariozechner/pi-ai";
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
-import { convertToLlm, serializeConversation } from "@mariozechner/pi-coding-agent";
+import { DynamicBorder, getMarkdownTheme, convertToLlm, serializeConversation } from "@mariozechner/pi-coding-agent";
+import { Container, Key, Markdown, matchesKey, Text, truncateToWidth, visibleWidth } from "@mariozechner/pi-tui";
+
+// Store the last compaction result for the /compaction command
+let lastCompaction: { summary: string; source: string; tokensBefore: string; summaryLength: number; timestamp: string } | undefined;
 
 export default function (pi: ExtensionAPI) {
+	// Post-compaction: show compact stats widget + store full summary for /compaction
+	pi.on("session_compact", (event, ctx) => {
+		if (!ctx.hasUI) return;
+
+		const { compactionEntry, fromExtension } = event;
+		const source = fromExtension ? "custom (Bedrock Haiku)" : "built-in";
+		const summaryLength = compactionEntry.summary.length;
+		const tokensBefore = compactionEntry.tokensBefore.toLocaleString();
+		const timestamp = new Date(compactionEntry.timestamp).toLocaleTimeString();
+
+		// Store for /compaction command
+		lastCompaction = { summary: compactionEntry.summary, source, tokensBefore, summaryLength, timestamp };
+
+		ctx.ui.notify(
+			`✓ Compaction complete — ${tokensBefore} tokens via ${source}. Use /compaction to view full summary.`,
+			"info",
+		);
+
+		// Show compact stats widget
+		ctx.ui.setWidget("compaction-summary", (_tui, theme) => ({
+			render() {
+				return [
+					theme.fg("borderMuted", "─────────────────────────────────────────────"),
+					theme.fg("accent", theme.bold("  ✓ Compaction Complete")),
+					theme.fg("muted", "  source  ") + theme.fg("text", source),
+					theme.fg("muted", "  tokens  ") + theme.fg("warning", tokensBefore) + theme.fg("dim", " before"),
+					theme.fg("muted", "  summary ") + theme.fg("text", `${summaryLength} chars`),
+					theme.fg("muted", "  time    ") + theme.fg("dim", timestamp),
+					theme.fg("dim", "  /compaction to view full summary"),
+					theme.fg("borderMuted", "─────────────────────────────────────────────"),
+				];
+			},
+			invalidate() {},
+		}));
+
+		setTimeout(() => {
+			ctx.ui.setWidget("compaction-summary", undefined);
+		}, 10_000);
+	});
+
+	// /compaction — scrollable overlay showing the full compaction summary
+	pi.registerCommand("compaction", {
+		description: "View the last compaction summary in a scrollable overlay",
+		handler: async (_args, ctx) => {
+			if (!lastCompaction) {
+				ctx.ui.notify("No compaction has occurred yet in this session.", "warning");
+				return;
+			}
+
+			const { summary, source, tokensBefore, summaryLength, timestamp } = lastCompaction;
+
+			const header = [
+				`> **Source:** ${source}  ·  **Tokens before:** ${tokensBefore}  ·  **Summary:** ${summaryLength} chars  ·  **Time:** ${timestamp}`,
+				"",
+				"---",
+				"",
+			].join("\n");
+
+			const fullContent = header + summary;
+
+			await ctx.ui.custom<void>(
+				(tui, theme, _kb, done) => {
+					const md = new Markdown(fullContent, 1, 1, getMarkdownTheme());
+					let scrollOffset = 0;
+					let contentLines: string[] = [];
+					let cachedWidth: number | undefined;
+					let cachedOutput: string[] | undefined;
+					const VIEWPORT_HEIGHT = 30;
+
+					return {
+						handleInput(data: string) {
+							const maxScroll = Math.max(0, contentLines.length - VIEWPORT_HEIGHT);
+							const pageSize = Math.max(1, VIEWPORT_HEIGHT - 2);
+							let changed = false;
+
+							if (matchesKey(data, Key.escape) || data === "q") {
+								done(undefined);
+								return;
+							} else if (matchesKey(data, Key.up) || data === "k") {
+								scrollOffset = Math.max(0, scrollOffset - 1);
+								changed = true;
+							} else if (matchesKey(data, Key.down) || data === "j") {
+								scrollOffset = Math.min(maxScroll, scrollOffset + 1);
+								changed = true;
+							} else if (matchesKey(data, "pageup") || matchesKey(data, Key.ctrl("u"))) {
+								scrollOffset = Math.max(0, scrollOffset - pageSize);
+								changed = true;
+							} else if (matchesKey(data, "pagedown") || matchesKey(data, Key.ctrl("d"))) {
+								scrollOffset = Math.min(maxScroll, scrollOffset + pageSize);
+								changed = true;
+							} else if (matchesKey(data, Key.home)) {
+								scrollOffset = 0;
+								changed = true;
+							} else if (matchesKey(data, Key.end)) {
+								scrollOffset = maxScroll;
+								changed = true;
+							}
+
+							if (changed) {
+								cachedWidth = undefined;
+								cachedOutput = undefined;
+								tui.requestRender();
+							}
+						},
+
+						render(width: number): string[] {
+							if (cachedOutput && cachedWidth === width) return cachedOutput;
+
+							// Render full markdown
+							contentLines = md.render(width - 2);
+
+							// Clamp scroll
+							const maxScroll = Math.max(0, contentLines.length - VIEWPORT_HEIGHT);
+							scrollOffset = Math.min(scrollOffset, maxScroll);
+
+							// Visible slice
+							const visible = contentLines.slice(scrollOffset, scrollOffset + VIEWPORT_HEIGHT);
+
+							// Scroll indicator
+							const pos = `${scrollOffset + 1}-${Math.min(scrollOffset + VIEWPORT_HEIGHT, contentLines.length)}/${contentLines.length}`;
+							const pct = maxScroll > 0 ? `${Math.round((scrollOffset / maxScroll) * 100)}%` : "100%";
+
+							// Build output
+							const border = theme.fg("borderMuted", "─".repeat(width));
+							const titleLeft = theme.fg("accent", theme.bold(" Compaction Summary"));
+							const titleRight = theme.fg("dim", `${pos} ${pct} `);
+							const titlePad = " ".repeat(Math.max(1, width - visibleWidth(titleLeft) - visibleWidth(titleRight)));
+							const titleLine = truncateToWidth(titleLeft + titlePad + titleRight, width, "");
+
+							const helpLine = theme.fg("dim", " ↑↓/j/k scroll · PgUp/PgDn · Home/End · q/Esc close");
+
+							const output = [
+								border,
+								titleLine,
+								border,
+								...visible,
+								border,
+								helpLine,
+								border,
+							];
+
+							cachedWidth = width;
+							cachedOutput = output;
+							return output;
+						},
+
+						invalidate() {
+							cachedWidth = undefined;
+							cachedOutput = undefined;
+							md.invalidate();
+						},
+					};
+				},
+				{
+					overlay: true,
+					overlayOptions: {
+						anchor: "center",
+						width: "80%",
+						minWidth: 60,
+						maxHeight: "85%",
+					},
+				},
+			);
+		},
+	});
+
 	pi.on("session_before_compact", async (event, ctx) => {
 		ctx.ui.notify("Custom compaction extension triggered", "info");
 
 		const { preparation, branchEntries: _, signal } = event;
 		const { messagesToSummarize, turnPrefixMessages, tokensBefore, firstKeptEntryId, previousSummary } = preparation;
 
-		// Use Gemini Flash for summarization (cheaper/faster than most conversation models)
-		const model = ctx.modelRegistry.find("google", "gemini-2.5-flash");
+		// Use AWS Bedrock Haiku for summarization (cheaper/faster than most conversation models)
+		const model = ctx.modelRegistry.find("amazon-bedrock", "us.anthropic.claude-haiku-4-5-20251001-v1:0");
 		if (!model) {
-			ctx.ui.notify(`Could not find Gemini Flash model, using default compaction`, "warning");
+			ctx.ui.notify(`Could not find AWS Bedrock Haiku model, using default compaction`, "warning");
 			return;
 		}
 
-		// Resolve API key for the summarization model
+		// Even for Bedrock, getApiKey() returns the resolved AWS credential/token
+		// that complete() needs internally to authenticate the request
 		const apiKey = await ctx.modelRegistry.getApiKey(model);
 		if (!apiKey) {
-			ctx.ui.notify(`No API key for ${model.provider}, using default compaction`, "warning");
+			ctx.ui.notify("Could not get AWS Bedrock credentials, using default compaction", "warning");
 			return;
 		}
 
@@ -42,7 +213,7 @@ export default function (pi: ExtensionAPI) {
 		const allMessages = [...messagesToSummarize, ...turnPrefixMessages];
 
 		ctx.ui.notify(
-			`Custom compaction: summarizing ${allMessages.length} messages (${tokensBefore.toLocaleString()} tokens) with ${model.id}...`,
+			`Custom compaction: summarizing ${allMessages.length} messages (${tokensBefore.toLocaleString()} tokens) with AWS Bedrock Haiku...`,
 			"info",
 		);
 
