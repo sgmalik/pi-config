@@ -34,6 +34,7 @@ export const THEME_MAP: Record<string, string> = {
 	"system-select":      "catppuccin-mocha", // soft selection UI
 	"theme-cycler":       "synthwave",        // neon, it's a theme tool
 	"tilldone":           "everforest",       // task-focused calm
+	"start-screen":       "synthwave",        // welcome dashboard
 	"tool-counter":       "synthwave",        // techy metrics
 	"tool-counter-widget":"synthwave",        // same family
 };
