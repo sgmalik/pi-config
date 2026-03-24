@@ -22,7 +22,7 @@ export default function (pi: ExtensionAPI) {
 		});
 	};
 
-	pi.on("turn_end", (_event, ctx) => {
+	pi.on("agent_end", (_event, ctx) => {
 		const usage = ctx.getContextUsage();
 		if (!usage || usage.tokens === null || usage.tokens <= COMPACT_THRESHOLD_TOKENS) {
 			return;
