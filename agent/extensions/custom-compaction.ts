@@ -80,12 +80,15 @@ export default function (pi: ExtensionAPI) {
 		// Store for /compaction command
 		lastCompaction = { summary: compactionEntry.summary, source, tokensBefore, summaryLength, timestamp };
 
-		ctx.ui.notify(
-			`✓ Compaction complete — ${tokensBefore} tokens via ${source}. Use /compaction to view full summary.`,
-			"info",
-		);
+		// Delay our notification so it appears AFTER pi's built-in "Compaction completed"
+		setTimeout(() => {
+			ctx.ui.notify(
+				`✓ ${source} compaction — ${tokensBefore} tokens → ${summaryLength} chars. /compaction to view.`,
+				"info",
+			);
+		}, 500);
 
-		// Show compact stats widget
+		// Show compact stats widget (longer duration so user sees it)
 		ctx.ui.setWidget("compaction-summary", (_tui, theme) => ({
 			render() {
 				return [
@@ -95,7 +98,7 @@ export default function (pi: ExtensionAPI) {
 					theme.fg("muted", "  tokens  ") + theme.fg("warning", tokensBefore) + theme.fg("dim", " before"),
 					theme.fg("muted", "  summary ") + theme.fg("text", `${summaryLength} chars`),
 					theme.fg("muted", "  time    ") + theme.fg("dim", timestamp),
-					theme.fg("dim", "  /compaction to view full summary"),
+					theme.fg("dim", "  /compaction to view · /compaction-edit to edit"),
 					theme.fg("borderMuted", "─────────────────────────────────────────────"),
 				];
 			},
@@ -104,7 +107,7 @@ export default function (pi: ExtensionAPI) {
 
 		setTimeout(() => {
 			ctx.ui.setWidget("compaction-summary", undefined);
-		}, 10_000);
+		}, 30_000);
 	});
 
 	// /compaction — scrollable overlay showing the full compaction summary
@@ -210,7 +213,7 @@ export default function (pi: ExtensionAPI) {
 
 							// Scroll info row
 							const scrollInfo = `${pos} ${pct}`;
-							const scrollLeft = " ↑↓/j/k · PgUp/PgDn · Home/End · e edit · q/Esc close";
+							const scrollLeft = " ↑↓/j/k · PgUp/PgDn · Home/End · e quick edit · q/Esc close";
 							const scrollPad = " ".repeat(Math.max(1, innerW - 2 - visibleWidth(scrollLeft) - visibleWidth(scrollInfo)));
 							const helpContent = theme.fg("dim", scrollLeft) + scrollPad + theme.fg("dim", scrollInfo);
 
@@ -248,7 +251,8 @@ export default function (pi: ExtensionAPI) {
 				},
 			);
 
-			// If user pressed 'e', open the editor with the raw summary
+			// If user pressed 'e', open the full-screen editor with the raw summary
+			// Enter = submit, Shift+Enter or \ + Enter = newline
 			if (action === "edit") {
 				const edited = await ctx.ui.editor("Edit Compaction Summary", summary);
 
@@ -269,6 +273,60 @@ export default function (pi: ExtensionAPI) {
 				} else if (edited === undefined) {
 					ctx.ui.notify("Edit cancelled", "info");
 				}
+			}
+		},
+	});
+
+	// /compaction-edit — open summary in $EDITOR for proper multi-line editing
+	pi.registerCommand("compaction-edit", {
+		description: "Edit the compaction summary in your terminal editor ($EDITOR)",
+		handler: async (_args, ctx) => {
+			if (!lastCompaction) {
+				ctx.ui.notify("No compaction has occurred yet in this session.", "warning");
+				return;
+			}
+
+			const fs = await import("fs");
+			const os = await import("os");
+			const path = await import("path");
+			const { execSync } = await import("child_process");
+
+			const tmpFile = path.join(os.tmpdir(), `pi-compaction-edit-${Date.now()}.md`);
+			fs.writeFileSync(tmpFile, lastCompaction.summary, "utf-8");
+
+			const editor = process.env.VISUAL || process.env.EDITOR || "vi";
+
+			ctx.ui.notify(`Opening in ${editor}...`, "info");
+
+			try {
+				execSync(`${editor} "${tmpFile}"`, { stdio: "inherit" });
+
+				const edited = fs.readFileSync(tmpFile, "utf-8");
+				fs.unlinkSync(tmpFile);
+
+				if (edited.trim() === lastCompaction.summary.trim()) {
+					ctx.ui.notify("No changes made", "info");
+					return;
+				}
+
+				// Update in-memory state
+				lastCompaction = { ...lastCompaction, summary: edited, summaryLength: edited.length };
+
+				// Persist the edit to the session so it survives resume
+				pi.appendEntry("compaction-edit", {
+					summary: edited,
+					source: lastCompaction.source,
+					tokensBefore: lastCompaction.tokensBefore,
+					timestamp: lastCompaction.timestamp,
+					editedAt: new Date().toISOString(),
+				});
+
+				ctx.ui.notify(`Compaction summary updated (${edited.length} chars)`, "info");
+			} catch (error) {
+				// Clean up temp file on error
+				try { fs.unlinkSync(tmpFile); } catch {}
+				const msg = error instanceof Error ? error.message : String(error);
+				ctx.ui.notify(`Editor failed: ${msg}`, "error");
 			}
 		},
 	});

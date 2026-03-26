@@ -89,7 +89,7 @@ export default function (pi: ExtensionAPI) {
 		// --- Active Extensions Summary ---
 		lines.push("## Active Extensions");
 		lines.push("");
-		lines.push("- **Custom Compaction** — Bedrock Haiku summarization with editable summaries");
+		lines.push("- **Custom Compaction** — Bedrock Haiku summarization, `/compaction` to view, `e` to quick edit, `/compaction-edit` for full editor");
 		lines.push("- **Protected Paths** — Blocks writes to .env/.git and confirms `rm` commands");
 		lines.push("- **Cost Tracker** — API spend tracking with `/cost`");
 		lines.push("- **Plan Mode** — Read-only exploration with `/plan` and `/todos`");
