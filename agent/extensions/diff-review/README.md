@@ -23,6 +23,30 @@ The result is a code-review workflow where you visually inspect diffs, leave tar
 /diff-review abc1234      # Review working tree vs a specific commit
 ```
 
+## Shell alias (standalone usage)
+
+The extension also works outside of pi as a standalone shell command. When run in print mode (`pi -p`), the review window opens identically but the composed prompt is written to **stdout** instead of being inserted into the pi editor.
+
+Add this to your `.zshrc` / `.bashrc`:
+
+```bash
+diff-review() { pi -p --no-session "/diff-review ${1:-HEAD}"; }
+```
+
+Then use it directly from the terminal:
+
+```bash
+diff-review              # review working tree vs HEAD
+diff-review main         # review vs main branch
+diff-review abc1234      # review vs a specific commit
+
+diff-review | pbcopy     # copy feedback to clipboard
+diff-review > review.txt # save to a file
+diff-review | pi -p      # pipe feedback straight into a new pi session
+```
+
+Status messages (file count, cancellation notices, errors) go to **stderr** so they don't pollute the prompt output when piping.
+
 ## The three comment layers
 
 The review window supports three distinct types of feedback, each serving a different purpose. All three are combined into a single prompt when you submit.
@@ -168,11 +192,11 @@ diff-review/
        ▼
    prompt.ts ── composeReviewPrompt() ──→ formatted text
        │
-       ▼
-   ctx.ui.setEditorText(prompt)  ──→ inserted into pi editor
+       ├── ctx.hasUI? ──→ ctx.ui.setEditorText(prompt)  (interactive)
+       └── !ctx.hasUI? ─→ process.stdout.write(prompt)  (headless / shell alias)
 ```
 
-### Blocking UI pattern
+### Blocking UI pattern (interactive mode only)
 
 While the native window is open, the extension shows a TUI overlay in the pi terminal via `ctx.ui.custom()`. This overlay:
 
@@ -209,3 +233,4 @@ This is a rewrite of [badlogic/pi-diff-review](https://github.com/badlogic/pi-di
 - `⌘/Ctrl+Enter` works from within comment textareas and modals
 - Migrated from installable git package to local directory extension
 - Changed default to show only changed areas (unchanged regions collapsed) so diffs are immediately visible without scrolling
+- Added headless mode (`ctx.hasUI` detection) — writes prompt to stdout when run via `pi -p`, enabling standalone shell alias usage
