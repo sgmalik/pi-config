@@ -2,7 +2,7 @@
   "packages": [
     "npm:@aliou/pi-guardrails"
   ],
-  "lastChangelogVersion": "0.68.0",
-  "theme": "rose-pine",
+  "lastChangelogVersion": "0.73.0",
+  "theme": "synthwave",
   "defaultThinkingLevel": "medium"
 }
