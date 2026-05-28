@@ -1,6 +1,6 @@
 import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
 
-const COMPACT_THRESHOLD_TOKENS = 100_000;
+const COMPACT_THRESHOLD_TOKENS = 150_000;
 
 export default function (pi: ExtensionAPI) {
 	const triggerCompaction = (ctx: ExtensionContext, customInstructions?: string) => {

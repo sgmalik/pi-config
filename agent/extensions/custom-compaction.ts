@@ -344,13 +344,13 @@ export default function (pi: ExtensionAPI) {
 			return;
 		}
 
-		// Even for Bedrock, getApiKey() returns the resolved AWS credential/token
-		// that complete() needs internally to authenticate the request
-		const apiKey = await ctx.modelRegistry.getApiKey(model);
-		if (!apiKey) {
-			ctx.ui.notify("Could not get AWS Bedrock credentials, using default compaction", "warning");
+		// getApiKeyAndHeaders() returns { ok, apiKey?, headers? } or { ok: false, error }
+		const auth = await ctx.modelRegistry.getApiKeyAndHeaders(model);
+		if (!auth.ok) {
+			ctx.ui.notify(`Could not get AWS Bedrock credentials: ${auth.error}. Using default compaction`, "warning");
 			return;
 		}
+		const apiKey = auth.apiKey;
 
 		// Combine all messages for full summary
 		const allMessages = [...messagesToSummarize, ...turnPrefixMessages];
