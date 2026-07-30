@@ -121,6 +121,59 @@
     height: 16px !important;
     box-shadow: 0 0 0 1px rgba(240, 246, 252, 0.08);
   }
+
+  /* Reasoning header (above diff) */
+  .reasoning-header-container {
+    border-bottom: 1px solid #30363d;
+    background: linear-gradient(to right, rgba(163, 113, 247, 0.06), transparent);
+    padding: 12px 20px;
+    border-left: 3px solid #a371f7;
+    max-height: 280px;
+    overflow-y: auto;
+  }
+
+  .reasoning-header-container::-webkit-scrollbar {
+    width: 6px;
+  }
+
+  .reasoning-header-container::-webkit-scrollbar-thumb {
+    background: #30363d;
+    border-radius: 3px;
+  }
+
+  .reasoning-header-title {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-bottom: 8px;
+    font-size: 11px;
+    font-weight: 600;
+    color: #a371f7;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+  }
+
+  .reasoning-header-icon {
+    width: 14px;
+    height: 14px;
+    color: #a371f7;
+    flex-shrink: 0;
+  }
+
+  .reasoning-header-item {
+    font-size: 13px;
+    line-height: 1.5;
+    color: #c9d1d9;
+    padding: 4px 0 4px 20px;
+    white-space: pre-wrap;
+    word-wrap: break-word;
+  }
+
+  .reasoning-header-item + .reasoning-header-item {
+    margin-top: 6px;
+    padding-top: 6px;
+    border-top: 1px solid rgba(48, 54, 61, 0.6);
+  }
 </style>
 </head>
 <body class="h-full overflow-hidden bg-review-bg text-review-text antialiased">
@@ -157,6 +210,7 @@
       </div>
     </div>
     <div id="file-comments-container" class="hidden border-b border-review-border bg-[#0d1117] px-4 py-0"></div>
+    <div id="reasoning-header" class="hidden"></div>
     <div id="editor-container" class="min-h-0 min-w-0 flex-1"></div>
   </main>
 </div>

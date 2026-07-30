@@ -31,6 +31,7 @@ const summaryEl = document.getElementById("summary");
 const currentFileLabelEl = document.getElementById("current-file-label");
 const mainPaneEl = document.getElementById("main-pane");
 const fileCommentsContainer = document.getElementById("file-comments-container");
+const reasoningHeaderEl = document.getElementById("reasoning-header");
 const editorContainerEl = document.getElementById("editor-container");
 const submitButton = document.getElementById("submit-button");
 const cancelButton = document.getElementById("cancel-button");
@@ -245,6 +246,7 @@ function renderTreeNode(node, depth) {
 
     const file = child.file;
     const count = state.comments.filter((comment) => comment.fileId === file.id).length;
+    const hasReasoning = (file.reasoning || []).length > 0;
     const reviewed = isFileReviewed(file.id);
     const button = document.createElement("button");
     button.type = "button";
@@ -255,10 +257,11 @@ function renderTreeNode(node, depth) {
     button.style.paddingLeft = `${(depth * indentPx) + 26}px`;
     button.innerHTML = `
       <span class="flex min-w-0 items-center gap-1.5 truncate ${file.id === state.activeFileId ? "font-medium" : ""}">
-        <span class="shrink-0 text-[10px] ${reviewed ? "text-[#3fb950]" : "text-transparent"}">●</span>
+        <span class="shrink-0 text-[10px] ${reviewed ? "text-[#3fb950]" : "text-transparent"}">\u25cf</span>
         <span class="truncate">${escapeHtml(child.name)}</span>
       </span>
       <span class="flex shrink-0 items-center gap-1.5">
+        ${hasReasoning ? `<span class="shrink-0 text-[10px] text-[#a371f7]" title="AI reasoning available">\u2726</span>` : ""}
         ${count > 0 ? `<span class="flex h-4 min-w-[16px] items-center justify-center rounded-full bg-[#1f2937] px-1 text-[10px] font-medium text-[#c9d1d9]">${count}</span>` : ""}
         <span class="font-medium ${statusBadgeClass(file.status)}">${escapeHtml(statusLabel(file.status).charAt(0))}</span>
       </span>
@@ -303,7 +306,9 @@ function renderTree() {
   fileTreeEl.innerHTML = "";
   renderTreeNode(buildTree(reviewData.files), 0);
   const comments = state.comments.length;
-  summaryEl.textContent = `${reviewData.files.length} file(s) • ${comments} comment(s)${state.overallComment ? " • overall note" : ""}`;
+  const hasReasoning = reviewData.files.some((f) => (f.reasoning || []).length > 0);
+  const reasoningSuffix = hasReasoning ? " • AI reasoning available" : "";
+  summaryEl.textContent = `${reviewData.files.length} file(s) • ${comments} comment(s)${state.overallComment ? " • overall note" : ""}${reasoningSuffix}`;
   updateToggleButtons();
 }
 
@@ -454,6 +459,8 @@ function syncViewZones() {
 
   const originalEditor = diffEditor.getOriginalEditor();
   const modifiedEditor = diffEditor.getModifiedEditor();
+
+  // Render inline comment view zones
   const inlineComments = state.comments.filter((c) => c.fileId === file.id && c.side !== "file");
 
   inlineComments.forEach((item) => {
@@ -534,6 +541,37 @@ function renderFileComments() {
   });
 }
 
+function renderReasoningHeader() {
+  reasoningHeaderEl.innerHTML = "";
+  const file = activeFile();
+  if (!file) return;
+
+  const reasons = file.reasoning || [];
+  if (reasons.length === 0) {
+    reasoningHeaderEl.className = "hidden";
+    return;
+  }
+
+  reasoningHeaderEl.className = "reasoning-header-container";
+
+  const header = document.createElement("div");
+  header.className = "reasoning-header-title";
+  header.innerHTML = `
+    <svg class="reasoning-header-icon" viewBox="0 0 16 16" fill="currentColor">
+      <path d="M8 1.5c-2.363 0-4 1.69-4 3.75 0 .984.424 1.625.984 2.304l.214.253c.223.264.47.556.673.848.284.411.537.896.621 1.49a.75.75 0 0 1-1.484.211c-.04-.282-.163-.547-.37-.847a8.456 8.456 0 0 0-.542-.68c-.084-.1-.173-.205-.268-.32C3.201 7.75 2.5 6.766 2.5 5.25 2.5 2.31 4.863.5 8 .5s5.5 1.81 5.5 4.75c0 1.516-.701 2.5-1.328 3.259a10.464 10.464 0 0 0-.268.32c-.207.245-.383.453-.541.681-.208.3-.33.565-.37.847a.751.751 0 0 1-1.485-.212c.084-.593.337-1.078.621-1.489.203-.292.45-.584.673-.848.075-.088.147-.173.213-.253.561-.679.985-1.32.985-2.304 0-2.06-1.637-3.75-4-3.75ZM5.75 12h4.5a.75.75 0 0 1 0 1.5h-4.5a.75.75 0 0 1 0-1.5ZM6 15.25a.75.75 0 0 1 .75-.75h2.5a.75.75 0 0 1 0 1.5h-2.5a.75.75 0 0 1-.75-.75Z"></path>
+    </svg>
+    <span>Intent</span>
+  `;
+  reasoningHeaderEl.appendChild(header);
+
+  for (const reason of reasons) {
+    const item = document.createElement("div");
+    item.className = "reasoning-header-item";
+    item.textContent = reason;
+    reasoningHeaderEl.appendChild(item);
+  }
+}
+
 // ── Mount file into diff editor ───────────────────────────────────────────
 
 function mountFile(options = {}) {
@@ -560,6 +598,7 @@ function mountFile(options = {}) {
   syncViewZones();
   updateDecorations();
   renderFileComments();
+  renderReasoningHeader();
   requestAnimationFrame(() => {
     layoutEditor();
     if (options.restoreFileScroll) restoreFileScrollPosition();
@@ -588,6 +627,7 @@ function updateCommentsUI() {
   syncViewZones();
   updateDecorations();
   renderFileComments();
+  renderReasoningHeader();
 }
 
 function renderAll(options = {}) {
@@ -601,6 +641,7 @@ function renderAll(options = {}) {
     });
   } else {
     renderFileComments();
+    renderReasoningHeader();
   }
 }
 
@@ -810,4 +851,5 @@ document.addEventListener("keydown", (event) => {
 
 renderTree();
 renderFileComments();
+renderReasoningHeader();
 setupMonaco();

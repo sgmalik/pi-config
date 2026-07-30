@@ -24,71 +24,62 @@ import { execSync } from "child_process";
 import { existsSync, readFileSync } from "fs";
 import { join } from "path";
 
-const SYSTEM_PROMPT = `You are a session handoff specialist. Your job is to create a comprehensive, self-contained briefing document that allows a fresh AI session to continue work seamlessly — as if it had been present for the entire previous conversation.
+const SYSTEM_PROMPT = `You are writing a handoff briefing for a fresh AI session that has ZERO prior context. Your job is to give it exactly what it needs to pick up where you left off — nothing more, nothing less.
 
-The receiving session will have ZERO context beyond what you provide. It cannot reference the old conversation. Everything it needs must be in your output.
+The user will provide:
+1. The conversation history from the current session
+2. Their goal/instructions for what the new session needs (marked clearly at the end)
 
-## Output Structure (follow exactly)
+## CRITICAL: The goal controls EVERYTHING
 
-### ## Background
-A 2-4 sentence summary of the project/feature being worked on. What is it? Why does it exist? What problem does it solve?
+The GOAL (provided last, after the conversation) is your absolute constraint. It tells you:
+- What to include
+- What to EXCLUDE
+- What level of detail
+- What the new session will be doing
 
-### ## Key Decisions & Findings
-Bullet list of every important decision, discovery, or conclusion reached during the conversation. Include the *reasoning* behind decisions, not just the decision itself. Flag any decisions that were contentious or might need revisiting.
+Do NOT simply summarize the most prominent or recent topics in the conversation. The conversation is raw material — the GOAL tells you what to extract from it.
 
-### ## Current State
-What's done, what's in progress, what's broken. Be specific:
-- [DONE] Completed items (with brief note on approach taken)
-- [WIP] In-progress items (what's left to do)
-- [BLOCKED] Blocked/broken items (what the issue is)
-- [WARN] Known issues or tech debt introduced
+If the goal says "general context, not one specific feature" — distribute attention evenly across ALL aspects discussed, and actively suppress over-representing whatever was most recently worked on.
 
-### ## Architecture & Approach
-How the solution is structured. Include:
-- High-level design (components, data flow, patterns used)
-- Important constraints or requirements that shaped the design
-- Rejected alternatives and why they were rejected
+If the goal says "focus on the bug in X" — ignore everything else.
 
-### ## Files & Locations
-Every file that was created, modified, or is relevant. Group by:
-- **Created**: New files made in this session
-- **Modified**: Existing files changed
-- **Key references**: Files not changed but important for understanding
+The goal may contain NEGATIVE constraints ("not X", "don't focus on Y"). These are hard requirements. Violating a negative constraint is worse than missing a positive one.
 
-### ## Code Patterns & Conventions
-Specific patterns established that the next session must follow:
-- Naming conventions used
-- Error handling approach
-- API patterns
-- Testing patterns
+## How to write the briefing
 
-### ## Environment & Setup
-Any setup, configuration, or environment details needed:
-- Required env vars
-- Build/run commands
-- Dependencies added
+Read the conversation. Read the goal. Then:
+1. Identify what the goal ASKS for
+2. Identify what the goal EXCLUDES or deprioritizes
+3. Extract from the conversation ONLY what serves (1) while respecting (2)
+4. Write the briefing
 
-### ## Task for Next Session
-Clear, actionable description of what to do next. Include:
-1. Specific steps in priority order
-2. Acceptance criteria — how to know each step is done
-3. Gotchas or pitfalls to watch out for
-4. Any open questions that need answering
+You might structure it as:
+- Context on what was tried and what failed (for debugging handoffs)
+- What was built and how it works (for continuation handoffs)
+- Key decisions and their reasoning (for design handoffs)
+- File paths and code references (almost always useful)
+- What specifically to do next
 
-### ## Context the Next Session Should Verify
-Things the next session should check/read before proceeding:
-- Files to read first to understand current state
-- Commands to run to verify environment
-- Tests to run to confirm nothing is broken
+You might NOT need:
+- Environment setup (if the goal doesn't involve setup)
+- Architecture overview (if the goal is a focused fix)
+- Code conventions (if the goal is investigation, not writing)
+- Exhaustive file lists (if only a few files matter)
+- Deep detail on a recently-completed feature (if the goal is about something else)
 
 ## Rules
-- Be THOROUGH over brief. A too-long handoff is better than one missing critical context.
-- Include exact file paths, function names, variable names — specifics matter.
-- If the conversation had errors/debugging, summarize the root cause and fix, not the whole journey.
-- If code snippets are essential for understanding (e.g., key interfaces, schemas), include them.
-- Do NOT include pleasantries, meta-commentary, or "Here's your handoff" preambles.
-- Do NOT use emojis.
-- Output the handoff document directly, starting with ## Background.`;
+
+- OBEY THE GOAL. Re-read it before you write. Re-read it after you write. Does every section serve the goal?
+- If the conversation spent 90% on topic X but the goal says "not X" — topic X gets at most a one-line mention.
+- Lead with what matters most for the goal. Don't bury the lede.
+- Be specific: exact file paths, function names, error messages, line numbers.
+- If debugging occurred, give the root cause and current theory — not the full journey of wrong turns.
+- Include code snippets ONLY when they're essential (key interfaces, the broken code, etc.)
+- Proportion your detail to what the goal asks for. "General context" means breadth over depth. "Fix this bug" means depth over breadth.
+- No preambles, no "Here's your handoff:", no meta-commentary. Start directly with content.
+- No emojis.
+- End with a clear, actionable statement of what to do next.`;
 
 // -------------------------------------------------------------------
 // Repo context gathering — builds a snapshot of the repository layout
@@ -302,8 +293,10 @@ export default function (pi: ExtensionAPI) {
 			const llmMessages = convertToLlm(messages);
 			let conversationText = serializeConversation(llmMessages);
 
-			// Truncate to avoid blowing context window — keep last ~80k chars
-			const MAX_CONTEXT_CHARS = 80000;
+			// Truncate to avoid blowing context window and reduce noise.
+			// 40k is enough for the model to extract what it needs without
+			// the sheer volume overwhelming the goal instruction.
+			const MAX_CONTEXT_CHARS = 40000;
 			if (conversationText.length > MAX_CONTEXT_CHARS) {
 				const truncatedNote = `[...earlier conversation truncated -- ${Math.round((conversationText.length - MAX_CONTEXT_CHARS) / 1000)}k chars omitted...]\n\n`;
 				conversationText = truncatedNote + conversationText.slice(-MAX_CONTEXT_CHARS);
@@ -329,12 +322,12 @@ export default function (pi: ExtensionAPI) {
 					const apiKey = auth.apiKey;
 
 					const userContent = [
-						`## User's Goal for New Session\n\n${goal}`,
-						gitContext,
 						`## Conversation History\n\n${conversationText}`,
+						gitContext,
+						`---\n\n## GOAL FOR THE NEW SESSION (this controls what you write)\n\n${goal}\n\n---\n\nREMEMBER: The above goal is your hard constraint. Every section you write must serve it. If the goal excludes something, exclude it — no matter how prominent it was in the conversation.`,
 					]
 						.filter(Boolean)
-						.join("\n\n---\n\n");
+						.join("\n\n");
 
 					const userMessage: Message = {
 						role: "user",

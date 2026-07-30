@@ -8,6 +8,8 @@ export interface DiffReviewFile {
   displayPath: string;
   oldContent: string;
   newContent: string;
+  /** High-level reasoning summary for this file's changes (from LLM) */
+  reasoning: string[];
 }
 
 export type CommentSide = "original" | "modified" | "file";

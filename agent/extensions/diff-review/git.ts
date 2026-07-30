@@ -1,5 +1,5 @@
-import { readFile } from "node:fs/promises";
-import { join } from "node:path";
+import { readFile, stat } from "node:fs/promises";
+import { extname, join } from "node:path";
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import type { ChangeStatus, DiffReviewFile } from "./types.js";
 
@@ -89,6 +89,9 @@ function parseNameStatus(output: string): ChangedPath[] {
 }
 
 async function getRefContent(pi: ExtensionAPI, repoRoot: string, ref: string, path: string): Promise<string> {
+  if (isBinaryPath(path)) return "";
+  const sizeResult = await pi.exec("git", ["cat-file", "-s", `${ref}:${path}`], { cwd: repoRoot });
+  if (sizeResult.code === 0 && parseInt(sizeResult.stdout.trim(), 10) > MAX_FILE_BYTES) return "";
   const result = await pi.exec("git", ["show", `${ref}:${path}`], { cwd: repoRoot });
   if (result.code !== 0) {
     return "";
@@ -96,9 +99,23 @@ async function getRefContent(pi: ExtensionAPI, repoRoot: string, ref: string, pa
   return result.stdout;
 }
 
+const BINARY_EXTENSIONS = new Set([
+  ".zip",
+]);
+
+const MAX_FILE_BYTES = 512 * 1024; // 512 KB
+
+function isBinaryPath(filePath: string): boolean {
+  return BINARY_EXTENSIONS.has(extname(filePath).toLowerCase());
+}
+
 async function getWorkingTreeContent(repoRoot: string, path: string): Promise<string> {
+  if (isBinaryPath(path)) return "";
   try {
-    return await readFile(join(repoRoot, path), "utf8");
+    const fullPath = join(repoRoot, path);
+    const info = await stat(fullPath);
+    if (info.size > MAX_FILE_BYTES) return "";
+    return await readFile(fullPath, "utf8");
   } catch {
     return "";
   }
@@ -110,6 +127,7 @@ function parseUntrackedPaths(output: string): ChangedPath[] {
     .map((line) => line.trim())
     .filter((line) => line.length > 0)
     .filter((path) => !path.includes("node_modules/"))
+    .filter((path) => !isBinaryPath(path))
     .map((path) => ({
       status: "added" as const,
       oldPath: null,
@@ -171,6 +189,7 @@ export async function getDiffReviewFiles(
         displayPath: toDisplayPath(change),
         oldContent,
         newContent,
+        reasoning: [],
       };
     }),
   );

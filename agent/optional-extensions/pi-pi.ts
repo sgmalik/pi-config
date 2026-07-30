@@ -21,7 +21,7 @@ import { Text, truncateToWidth, visibleWidth } from "@mariozechner/pi-tui";
 import { spawn } from "child_process";
 import { readdirSync, readFileSync, existsSync, mkdirSync } from "fs";
 import { join, resolve } from "path";
-import { applyExtensionDefaults } from "../extensions/lib/themeMap.ts";
+import { applyExtensionDefaults } from "./themeMap.ts";
 
 // ── Types ────────────────────────────────────────
 
@@ -41,6 +41,26 @@ interface ExpertState {
 	lastLine: string;
 	queryCount: number;
 	timer?: ReturnType<typeof setInterval>;
+}
+
+interface ActiveQuery {
+	id: string;
+	expertName: string;
+	def: ExpertDef;
+	question: string;
+	status: "researching" | "done" | "error";
+	elapsed: number;
+	timer?: ReturnType<typeof setInterval>;
+}
+
+interface CompletedResult {
+	id: string;
+	expertName: string;
+	question: string;
+	status: "done" | "error";
+	elapsed: number;
+	output: string;
+	timestamp: number;
 }
 
 // ── Helpers ──────────────────────────────────────
@@ -98,24 +118,31 @@ const BG_RESET = "\x1b[49m";
 
 export default function (pi: ExtensionAPI) {
 	const experts: Map<string, ExpertState> = new Map();
+	const activeQueries: Map<string, ActiveQuery> = new Map();
+	const completedResults: CompletedResult[] = [];
+	let queryIdCounter = 0;
 	let gridCols = 3;
 	let widgetCtx: any;
+	let showRoster = true; // show full roster on startup, hide after first message
 
 	function loadExperts(cwd: string) {
-		// Pi Pi experts live in their own dedicated directory
-		const piPiDir = join(cwd, ".pi", "agents", "pi-pi");
-		const globalPiPiDir = join(process.env.HOME || "", ".pi", "agent", "agents", "pi-pi");
-		const dir = existsSync(piPiDir) ? piPiDir : existsSync(globalPiPiDir) ? globalPiPiDir : null;
+		// Search multiple possible locations for pi-pi expert .md files
+		const candidates = [
+			join(cwd, ".pi", "agents", "pi-pi"),
+			join(cwd, ".pi", "agent", "agents", "pi-pi"),
+			join(process.env.HOME || "", ".pi", "agents", "pi-pi"),
+			join(process.env.HOME || "", ".pi", "agent", "agents", "pi-pi"),
+		];
 
 		experts.clear();
 
-		if (!dir) return;
-		const piPiDirResolved = dir;
+		const piPiDir = candidates.find(d => existsSync(d));
+		if (!piPiDir) return;
 		try {
-			for (const file of readdirSync(piPiDirResolved)) {
+			for (const file of readdirSync(piPiDir)) {
 				if (!file.endsWith(".md")) continue;
 				if (file === "pi-orchestrator.md") continue;
-				const fullPath = resolve(piPiDirResolved, file);
+				const fullPath = resolve(piPiDir, file);
 				const def = parseAgentFile(fullPath);
 				if (def) {
 					const key = def.name.toLowerCase();
@@ -136,52 +163,39 @@ export default function (pi: ExtensionAPI) {
 
 	// ── Grid Rendering ───────────────────────────
 
-	function renderCard(state: ExpertState, colWidth: number, theme: any): string[] {
+	// ── Spinning frames for active experts ───
+	const SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+	let spinnerTick = 0;
+
+	function renderActiveCard(query: ActiveQuery, colWidth: number, theme: any): string[] {
 		const w = colWidth - 2;
 		const truncate = (s: string, max: number) => s.length > max ? s.slice(0, max - 3) + "..." : s;
 
-		const statusColor = state.status === "idle" ? "dim"
-			: state.status === "researching" ? "accent"
-			: state.status === "done" ? "success" : "error";
-		const statusIcon = state.status === "idle" ? "○"
-			: state.status === "researching" ? "◉"
-			: state.status === "done" ? "✓" : "✗";
-
-		const name = displayName(state.def.name);
+		const name = displayName(query.expertName);
 		const nameStr = theme.fg("accent", theme.bold(truncate(name, w)));
 		const nameVisible = Math.min(name.length, w);
 
-		const statusStr = `${statusIcon} ${state.status}`;
-		const timeStr = state.status !== "idle" ? ` ${Math.round(state.elapsed / 1000)}s` : "";
-		const queriesStr = state.queryCount > 0 ? ` (${state.queryCount})` : "";
-		const statusLine = theme.fg(statusColor, statusStr + timeStr + queriesStr);
-		const statusVisible = statusStr.length + timeStr.length + queriesStr.length;
+		const elapsed = Math.round(query.elapsed / 1000);
+		const spinner = SPINNER_FRAMES[spinnerTick % SPINNER_FRAMES.length];
+		const thinkingStr = `${spinner} thinking… ${elapsed}s`;
+		const thinkingLine = theme.fg("accent", thinkingStr);
+		const thinkingVisible = thinkingStr.length;
 
-		const workRaw = state.question || state.def.description;
-		const workText = truncate(workRaw, Math.min(50, w - 1));
-		const workLine = theme.fg("muted", workText);
-		const workVisible = workText.length;
+		const questionText = truncate(query.question, Math.min(60, w - 1));
+		const questionLine = theme.fg("muted", questionText);
+		const questionVisible = questionText.length;
 
-		const lastRaw = state.lastLine || "";
-		const lastText = truncate(lastRaw, Math.min(50, w - 1));
-		const lastLineRendered = lastText ? theme.fg("dim", lastText) : theme.fg("dim", "—");
-		const lastVisible = lastText ? lastText.length : 1;
-
-		const colors = EXPERT_COLORS[state.def.name];
+		const colors = EXPERT_COLORS[query.expertName];
 		const bg  = colors?.bg ?? "";
 		const br  = colors?.br ?? "";
 		const bgr = bg ? BG_RESET : "";
 		const fgr = br ? FG_RESET : "";
 
-		// br colors the box-drawing characters; bg fills behind them so the
-		// full card — top line, side bars, bottom line — is one solid block.
 		const bord = (s: string) => bg + br + s + bgr + fgr;
 
 		const top = "┌" + "─".repeat(w) + "┐";
 		const bot = "└" + "─".repeat(w) + "┘";
 
-		// bg fills the inner content area; re-applied before padding to ensure
-		// the full row is colored even if theme.fg uses a full ANSI reset inside.
 		const border = (content: string, visLen: number) => {
 			const pad = " ".repeat(Math.max(0, w - visLen));
 			return bord("│") + bg + content + bg + pad + bgr + bord("│");
@@ -190,15 +204,23 @@ export default function (pi: ExtensionAPI) {
 		return [
 			bord(top),
 			border(" " + nameStr, 1 + nameVisible),
-			border(" " + statusLine, 1 + statusVisible),
-			border(" " + workLine, 1 + workVisible),
-			border(" " + lastLineRendered, 1 + lastVisible),
+			border(" " + thinkingLine, 1 + thinkingVisible),
+			border(" " + questionLine, 1 + questionVisible),
 			bord(bot),
 		];
 	}
 
 	function updateWidget() {
 		if (!widgetCtx) return;
+		spinnerTick++;
+
+		const active = Array.from(activeQueries.values());
+
+		// Hide widget entirely when not needed (no roster, no active experts)
+		if (!showRoster && active.length === 0) {
+			widgetCtx.ui.setWidget("pi-pi-grid", undefined);
+			return;
+		}
 
 		widgetCtx.ui.setWidget("pi-pi-grid", (_tui: any, theme: any) => {
 
@@ -208,28 +230,50 @@ export default function (pi: ExtensionAPI) {
 						return ["", theme.fg("dim", "  No experts found. Add agent .md files to .pi/agents/pi-pi/")];
 					}
 
-					const cols = Math.min(gridCols, experts.size);
-					const gap = 1;
-					// avoid Text component's ANSI-width miscounting by returning raw lines
-					const colWidth = Math.floor((width - gap * (cols - 1)) / cols) - 1;
-					const allExperts = Array.from(experts.values());
+					const active = Array.from(activeQueries.values());
+					const lines: string[] = [""];
 
-					const lines: string[] = [""]; // top margin
+					if (showRoster) {
+						// ── Startup: full roster ──
+						const allExperts = Array.from(experts.values());
+						lines.push(theme.fg("accent", theme.bold("  Pi Pi Team")) + theme.fg("dim", ` — ${experts.size} experts`));
+						lines.push("");
 
-					for (let i = 0; i < allExperts.length; i += cols) {
-						const rowExperts = allExperts.slice(i, i + cols);
-						const cards = rowExperts.map(e => renderCard(e, colWidth, theme));
-
-						while (cards.length < cols) {
-							cards.push(Array(6).fill(" ".repeat(colWidth)));
+						for (const state of allExperts) {
+							const icon = "○";
+							const name = displayName(state.def.name);
+							const descMax = Math.max(20, width - 4 - 18 - 10);
+							const desc = state.def.description.length > descMax
+								? state.def.description.slice(0, descMax - 3) + "..."
+								: state.def.description;
+							lines.push(
+								"  " + theme.fg("dim", icon) + " " +
+								theme.fg("accent", name.padEnd(18)) +
+								theme.fg("muted", desc)
+							);
 						}
+					} else if (active.length > 0) {
+						// ── Active: only show cards for researching queries ──
+						const cols = Math.min(gridCols, active.length);
+						const gap = 1;
+						const colWidth = Math.floor((width - gap * (cols - 1)) / cols) - 1;
 
-						const cardHeight = cards[0].length;
-						for (let line = 0; line < cardHeight; line++) {
-							lines.push(cards.map(card => card[line] || "").join(" ".repeat(gap)));
+						for (let i = 0; i < active.length; i += cols) {
+							const rowQueries = active.slice(i, i + cols);
+							const cards = rowQueries.map(q => renderActiveCard(q, colWidth, theme));
+
+							while (cards.length < cols) {
+								cards.push(Array(5).fill(" ".repeat(colWidth)));
+							}
+
+							const cardHeight = cards[0].length;
+							for (let line = 0; line < cardHeight; line++) {
+								lines.push(cards.map(card => card[line] || "").join(" ".repeat(gap)));
+							}
 						}
 					}
 
+					lines.push("");
 					return lines;
 				},
 				invalidate() {},
@@ -254,13 +298,17 @@ export default function (pi: ExtensionAPI) {
 			});
 		}
 
-		if (state.status === "researching") {
-			return Promise.resolve({
-				output: `Expert "${displayName(state.def.name)}" is already researching. Wait for it to finish.`,
-				exitCode: 1,
-				elapsed: 0,
-			});
-		}
+		// Create a unique active query instance (allows same expert queried multiple times)
+		const queryId = `${key}-${++queryIdCounter}`;
+		const activeQuery: ActiveQuery = {
+			id: queryId,
+			expertName: state.def.name,
+			def: state.def,
+			question,
+			status: "researching",
+			elapsed: 0,
+		};
+		activeQueries.set(queryId, activeQuery);
 
 		state.status = "researching";
 		state.question = question;
@@ -270,8 +318,9 @@ export default function (pi: ExtensionAPI) {
 		updateWidget();
 
 		const startTime = Date.now();
-		state.timer = setInterval(() => {
-			state.elapsed = Date.now() - startTime;
+		activeQuery.timer = setInterval(() => {
+			activeQuery.elapsed = Date.now() - startTime;
+			state.elapsed = activeQuery.elapsed;
 			updateWidget();
 		}, 1000);
 
@@ -314,10 +363,6 @@ export default function (pi: ExtensionAPI) {
 							const delta = event.assistantMessageEvent;
 							if (delta?.type === "text_delta") {
 								textChunks.push(delta.delta || "");
-								const full = textChunks.join("");
-								const last = full.split("\n").filter((l: string) => l.trim()).pop() || "";
-								state.lastLine = last;
-								updateWidget();
 							}
 						}
 					} catch {}
@@ -338,28 +383,46 @@ export default function (pi: ExtensionAPI) {
 					} catch {}
 				}
 
-				clearInterval(state.timer);
-				state.elapsed = Date.now() - startTime;
+				clearInterval(activeQuery.timer);
+				activeQuery.elapsed = Date.now() - startTime;
+				activeQuery.status = code === 0 ? "done" : "error";
+				activeQueries.delete(queryId);
+
+				state.elapsed = activeQuery.elapsed;
 				state.status = code === 0 ? "done" : "error";
 
 				const full = textChunks.join("");
 				state.lastLine = full.split("\n").filter((l: string) => l.trim()).pop() || "";
+
+				// Store completed result
+				completedResults.push({
+					id: queryId,
+					expertName: state.def.name,
+					question,
+					status: code === 0 ? "done" : "error",
+					elapsed: activeQuery.elapsed,
+					output: full,
+					timestamp: Date.now(),
+				});
+
 				updateWidget();
 
 				ctx.ui.notify(
-					`${displayName(state.def.name)} ${state.status} in ${Math.round(state.elapsed / 1000)}s`,
+					`${displayName(state.def.name)} ${state.status} in ${Math.round(activeQuery.elapsed / 1000)}s`,
 					state.status === "done" ? "success" : "error"
 				);
 
 				resolve({
 					output: full,
 					exitCode: code ?? 1,
-					elapsed: state.elapsed,
+					elapsed: activeQuery.elapsed,
 				});
 			});
 
 			proc.on("error", (err) => {
-				clearInterval(state.timer);
+				clearInterval(activeQuery.timer);
+				activeQuery.status = "error";
+				activeQueries.delete(queryId);
 				state.status = "error";
 				state.lastLine = `Error: ${err.message}`;
 				updateWidget();
@@ -428,7 +491,12 @@ Ask specific questions about what you need to BUILD. Each expert will return doc
 			// Launch ALL experts concurrently — allSettled so one failure
 			// never discards results from the others
 			const settled = await Promise.allSettled(
-				queries.map(async ({ expert, question }) => {
+				queries.map(async ({ expert, question }, idx) => {
+					// Stagger same-expert queries to avoid API rate limits
+					const sameExpertBefore = queries.slice(0, idx).filter(q => q.expert === expert).length;
+					if (sameExpertBefore > 0) {
+						await new Promise(r => setTimeout(r, sameExpertBefore * 2000));
+					}
 					const result = await queryExpert(expert, question, ctx);
 					const truncated = result.output.length > 12000
 						? result.output.slice(0, 12000) + "\n\n... [truncated — ask follow-up for more]"
@@ -555,18 +623,87 @@ Ask specific questions about what you need to BUILD. Each expert will return doc
 		},
 	});
 
+	pi.registerCommand("results", {
+		description: "Show completed expert results: /results [N] — show last N results (default 5)",
+		handler: async (args, _ctx) => {
+			widgetCtx = _ctx;
+			const n = parseInt(args?.trim() || "5", 10) || 5;
+			const recent = completedResults.slice(-n);
+			if (recent.length === 0) {
+				_ctx.ui.notify("No completed expert results yet.", "info");
+				return;
+			}
+
+			_ctx.ui.setWidget("pi-pi-results", (_tui: any, theme: any) => {
+				return {
+					render(width: number): string[] {
+						const lines: string[] = [""];
+						lines.push(theme.fg("accent", theme.bold("  Expert Results")) + theme.fg("dim", ` — last ${recent.length}`));
+						lines.push("");
+
+						for (const r of recent) {
+							const icon = r.status === "done" ? "✓" : "✗";
+							const color = r.status === "done" ? "success" : "error";
+							const elapsed = Math.round(r.elapsed / 1000);
+							const name = displayName(r.expertName);
+							const qMax = Math.max(20, width - 4 - 18 - 10);
+							const q = r.question.length > qMax ? r.question.slice(0, qMax - 3) + "..." : r.question;
+							lines.push(
+								"  " + theme.fg(color, icon) + " " +
+								theme.fg("accent", name.padEnd(18)) +
+								theme.fg("dim", `${elapsed}s `) +
+								theme.fg("muted", q)
+							);
+
+							const preview = r.output.split("\n").filter(l => l.trim()).slice(0, 3);
+							for (const pl of preview) {
+								const maxLine = width - 8;
+								const trimmed = pl.length > maxLine ? pl.slice(0, maxLine - 3) + "..." : pl;
+								lines.push("      " + theme.fg("dim", trimmed));
+							}
+							lines.push("");
+						}
+
+						lines.push(theme.fg("dim", "  /results-clear to dismiss"));
+						lines.push("");
+						return lines;
+					},
+					invalidate() {},
+				};
+			});
+		},
+	});
+
+	pi.registerCommand("results-clear", {
+		description: "Dismiss the results widget",
+		handler: async (_args, _ctx) => {
+			_ctx.ui.setWidget("pi-pi-results", undefined);
+		},
+	});
+
 	// ── System Prompt ────────────────────────────
 
 	pi.on("before_agent_start", async (_event, _ctx) => {
+		// Hide the startup roster once the user starts interacting
+		if (showRoster) {
+			showRoster = false;
+			updateWidget(); // will clear widget since no experts are active yet
+		}
+
 		const expertCatalog = Array.from(experts.values())
 			.map(s => `### ${displayName(s.def.name)}\n**Query as:** \`${s.def.name}\`\n${s.def.description}`)
 			.join("\n\n");
 
 		const expertNames = Array.from(experts.values()).map(s => displayName(s.def.name)).join(", ");
 
-		const localOrchestratorPath = join(_ctx.cwd, ".pi", "agents", "pi-pi", "pi-orchestrator.md");
-		const globalOrchestratorPath = join(process.env.HOME || "", ".pi", "agent", "agents", "pi-pi", "pi-orchestrator.md");
-		const orchestratorPath = existsSync(localOrchestratorPath) ? localOrchestratorPath : globalOrchestratorPath;
+		const orchestratorCandidates = [
+			join(_ctx.cwd, ".pi", "agents", "pi-pi", "pi-orchestrator.md"),
+			join(_ctx.cwd, ".pi", "agent", "agents", "pi-pi", "pi-orchestrator.md"),
+			join(process.env.HOME || "", ".pi", "agents", "pi-pi", "pi-orchestrator.md"),
+			join(process.env.HOME || "", ".pi", "agent", "agents", "pi-pi", "pi-orchestrator.md"),
+		];
+		const orchestratorPath = orchestratorCandidates.find(p => existsSync(p))
+			|| orchestratorCandidates[0];
 		let systemPrompt = "";
 		try {
 			const raw = readFileSync(orchestratorPath, "utf-8");
@@ -617,8 +754,8 @@ Ask specific questions about what you need to BUILD. Each expert will return doc
 				const filled = Math.round(pct / 10);
 				const bar = "#".repeat(filled) + "-".repeat(10 - filled);
 
-				const active = Array.from(experts.values()).filter(e => e.status === "researching").length;
-				const done = Array.from(experts.values()).filter(e => e.status === "done").length;
+				const active = activeQueries.size;
+				const done = completedResults.length;
 
 				const left = theme.fg("dim", ` ${model}`) +
 					theme.fg("muted", " · ") +

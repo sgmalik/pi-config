@@ -1,6 +1,7 @@
 import type { ExtensionAPI, ExtensionCommandContext } from "@mariozechner/pi-coding-agent";
 import { Key, matchesKey, truncateToWidth } from "@mariozechner/pi-tui";
 import { open, type GlimpseWindow } from "glimpseui";
+import { generateFileReasoning } from "./annotations.js";
 import { getDiffReviewFiles } from "./git.js";
 import { composeReviewPrompt } from "./prompt.js";
 import type { ReviewSubmitPayload, ReviewWindowMessage } from "./types.js";
@@ -266,6 +267,23 @@ export default function (pi: ExtensionAPI) {
     if (files.length === 0) {
       log(ctx, `No changes found against ${ref}.`);
       return;
+    }
+
+    // Generate per-file reasoning using LLM
+    try {
+      if (ctx.model) {
+        const auth = await ctx.modelRegistry.getApiKeyAndHeaders(ctx.model);
+        if (auth.ok) {
+          log(ctx, `Generating reasoning for ${files.length} file(s)...`);
+          await generateFileReasoning(files, {
+            model: ctx.model,
+            apiKey: auth.apiKey!,
+          });
+        }
+      }
+    } catch (err) {
+      // Non-fatal: if reasoning generation fails, proceed without it
+      log(ctx, `Reasoning generation skipped: ${err instanceof Error ? err.message : String(err)}`, "warning");
     }
 
     const html = buildReviewHtml({ repoRoot, files });
