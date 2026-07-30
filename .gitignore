@@ -1,5 +1,9 @@
 agent/sessions
 agent/auth.json
+agent/pi-crash.log
 node_modules
 .DS_Store
+aws-pi.sh
+syc-aws.sh
+syc-pi.sh
 
