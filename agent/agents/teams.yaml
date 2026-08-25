@@ -1,0 +1,17 @@
+default:
+  - oss-fast
+  - oss-strong
+  - hard
+  - opus
+  - scout
+  - code-reviewer
+  - architect
+
+routing:
+  - oss-fast
+  - oss-strong
+  - hard
+
+review:
+  - code-reviewer
+  - hard
