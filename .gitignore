@@ -6,4 +6,10 @@ node_modules
 aws-pi.sh
 syc-aws.sh
 syc-pi.sh
-
+pi-atlas-cache.json
+models-store.json
+models.json
+agent/settings.json
+trust.json
+pi-crash.log
+agent/tsconfig.json

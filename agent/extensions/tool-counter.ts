@@ -1,13 +1,8 @@
 /**
  * Tool Counter — Rich two-line custom footer
  *
- * Line 1: model + context meter on left, tokens in/out + cost on right
+ * Line 1: model + context meter on left, tokens in/out + cost + cache hit% on right
  * Line 2: cwd (branch) on left, tool call tally on right
- *
- * Demonstrates: setFooter, footerData.getGitBranch(), onBranchChange(),
- * session branch traversal for token/cost accumulation.
- *
- * Usage: pi -e extensions/tool-counter.ts
  */
 
 import type { AssistantMessage } from "@mariozechner/pi-ai";
@@ -15,6 +10,31 @@ import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import { truncateToWidth, visibleWidth } from "@mariozechner/pi-tui";
 import { basename } from "node:path";
 import { applyExtensionDefaults } from "./lib/themeMap.ts";
+
+// Maps AIP profile IDs (last segment of ARN) to friendly names
+const AIP_NAMES: Record<string, string> = {
+	"1xd0f80p0sob": "haiku-4-5",
+	"ijbemdw11wt8": "opus-4-5",
+	"3kvz3k0n0omc": "opus-4-6",
+	"6u4c1tf3bb5x": "opus-4-7",
+	"xsahe8qo68zv": "opus-4-8",
+	"j4r6oet02qnx": "sonnet-4",
+	"qp7zi66w8hlf": "sonnet-4-5",
+	"2zz214l0w3el": "sonnet-4-6",
+	"ov5vdsffeznl": "sonnet-5",
+	"8qvdt0ezj0gy": "deepseek-v3-2",
+	"2uzqen647naq": "glm-5",
+};
+
+function friendlyModel(id: string): string {
+	// Full ARN: arn:aws:bedrock:...:application-inference-profile/<id>
+	if (id.includes("application-inference-profile/")) {
+		const profileId = id.split("application-inference-profile/")[1];
+		return AIP_NAMES[profileId] ?? profileId;
+	}
+	// Cross-region inference profile: us.anthropic.claude-sonnet-4-6-...
+	return id.replace(/^(us|eu|ap)\./, "").replace(/-\d{8}-v\d+:\d+$/, "");
+}
 
 export default function (pi: ExtensionAPI) {
 	const counts: Record<string, number> = {};
@@ -32,15 +52,18 @@ export default function (pi: ExtensionAPI) {
 				dispose: unsub,
 				invalidate() {},
 				render(width: number): string[] {
-					// --- Line 1: cwd + branch (left), tokens + cost (right) ---
 					let tokIn = 0;
 					let tokOut = 0;
+					let cacheRead = 0;
+					let cacheWrite = 0;
 					let cost = 0;
 					for (const entry of ctx.sessionManager.getBranch()) {
 						if (entry.type === "message" && entry.message.role === "assistant") {
 							const m = entry.message as AssistantMessage;
 							tokIn += m.usage.input;
 							tokOut += m.usage.output;
+							cacheRead += m.usage.cacheRead ?? 0;
+							cacheWrite += m.usage.cacheWrite ?? 0;
 							cost += m.usage.cost.total;
 						}
 					}
@@ -49,12 +72,19 @@ export default function (pi: ExtensionAPI) {
 					const dir = basename(ctx.cwd);
 					const branch = footerData.getGitBranch();
 
-					// --- Line 1: model + context meter (left), tokens + cost (right) ---
+					// Cache hit % = cacheRead / (cacheRead + tokIn), shown only once we have data
+					const totalInput = tokIn + cacheRead;
+					const cacheHitPct = totalInput > 0 ? Math.round((cacheRead / totalInput) * 100) : null;
+					const cacheColor = cacheHitPct === null ? "dim"
+						: cacheHitPct >= 70 ? "success"
+						: cacheHitPct >= 40 ? "warning"
+						: "error";
+
+					// --- Line 1: model + context meter (left), tokens + cost + cache (right) ---
 					const usage = ctx.getContextUsage();
 					const pct = usage ? usage.percent : 0;
 					const filled = Math.round(pct / 10) || 1;
-					const bar = "#".repeat(filled) + "-".repeat(10 - filled);
-					const model = ctx.model?.id || "no-model";
+					const model = friendlyModel(ctx.model?.id ?? "no-model");
 
 					const l1Left =
 						theme.fg("dim", ` ${model} `) +
@@ -65,12 +95,17 @@ export default function (pi: ExtensionAPI) {
 						theme.fg("dim", " ") +
 						theme.fg("accent", `${Math.round(pct)}%`);
 
+					const cacheStr = cacheHitPct !== null
+						? theme.fg("dim", " cache ") + theme.fg(cacheColor, `${cacheHitPct}%`)
+						: "";
+
 					const l1Right =
 						theme.fg("success", `${fmt(tokIn)}`) +
 						theme.fg("dim", " in ") +
 						theme.fg("accent", `${fmt(tokOut)}`) +
 						theme.fg("dim", " out ") +
 						theme.fg("warning", `$${cost.toFixed(4)}`) +
+						cacheStr +
 						theme.fg("dim", " ");
 
 					const pad1 = " ".repeat(Math.max(1, width - visibleWidth(l1Left) - visibleWidth(l1Right)));

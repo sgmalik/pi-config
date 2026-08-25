@@ -23,6 +23,10 @@ import { readdirSync, readFileSync, existsSync, mkdirSync } from "fs";
 import { join, resolve } from "path";
 import { applyExtensionDefaults } from "./themeMap.ts";
 
+// ── Constants ────────────────────────────────────
+
+const EXPERT_MODEL = "amazon-bedrock/us.anthropic.claude-opus-4-6-v1";
+
 // ── Types ────────────────────────────────────────
 
 interface ExpertDef {
@@ -324,16 +328,12 @@ export default function (pi: ExtensionAPI) {
 			updateWidget();
 		}, 1000);
 
-		const model = ctx.model
-			? `${ctx.model.provider}/${ctx.model.id}`
-			: "openrouter/google/gemini-3-flash-preview";
-
 		const args = [
 			"--mode", "json",
 			"-p",
 			"--no-session",
 			"--no-extensions",
-			"--model", model,
+			"--model", EXPERT_MODEL,
 			"--tools", state.def.tools,
 			"--thinking", "off",
 			"--append-system-prompt", state.def.systemPrompt,
