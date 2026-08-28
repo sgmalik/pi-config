@@ -13,3 +13,4 @@ agent/settings.json
 trust.json
 pi-crash.log
 agent/tsconfig.json
+agent/fff/
