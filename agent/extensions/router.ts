@@ -88,7 +88,13 @@ Analyze the user's intent and produce a task manifest. Do NOT edit or write any 
      IMPLEMENTATION_FLOOR: haiku    (routine implementation, straightforward debugging)
      IMPLEMENTATION_FLOOR: sonnet   (architecture, security, concurrency, cross-cutting or multi-file changes)
 
-The floor anchors the model used during implementation, so pick honestly based on the hardest step in the plan.`;
+5. Below the floor marker, suggest specific subagent tasks AT OR ABOVE the floor tier:
+     SUBAGENT_TASK: agent:haiku task:"<subtask>"  (only if floor is nova or haiku)
+     SUBAGENT_TASK: agent:sonnet task:"<subtask>" (only if floor is haiku or sonnet)
+     SUBAGENT_TASK: agent:opus task:"<subtask>"   (for work harder than the floor)
+     (one per line, as many as needed)
+
+The floor is the MINIMUM tier for the work. Suggest subagents at or above that tier to parallelize focused aspects. Subagent suggestions weaker than the floor will be ignored.`;
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -112,11 +118,31 @@ function extractLastAssistantText(messages: any[]): string {
 	return "";
 }
 
+function parseSubagentTasks(text: string): Array<{ agent: string; task: string }> {
+	const lines = text.split("\n");
+	const tasks: Array<{ agent: string; task: string }> = [];
+	for (const line of lines) {
+		const m = line.match(/SUBAGENT_TASK:\s*agent:(\w+)\s+task:"([^"]+)"/);
+		if (m) {
+			tasks.push({ agent: m[1] as Tier, task: m[2] });
+		}
+	}
+	return tasks;
+}
+
 function parseFloor(text: string): Tier | null {
 	const m = text.match(/IMPLEMENTATION_FLOOR:\s*(nova|haiku|sonnet)/i);
 	if (!m) return null;
 	const tier = m[1].toLowerCase() as Tier;
 	return FLOOR_CHOICES.includes(tier) ? tier : null;
+}
+
+function tierIndex(tier: Tier): number {
+	return TIER_ORDER.indexOf(tier);
+}
+
+function isTierAtOrAbove(tier: Tier, floor: Tier): boolean {
+	return tierIndex(tier) >= tierIndex(floor);
 }
 
 // ─── Extension Entry Point ──────────────────────────────────────────────────
@@ -168,17 +194,29 @@ export default function (pi: ExtensionAPI) {
 
 	// ─── Session Start ─────────────────────────────────────────────────────
 
-	pi.on("session_start", (_event: any, ctx: any) => {
+	pi.on("session_start", (event: any, ctx: any) => {
 		consecutiveErrors = 0;
-		pinnedTier = null;
 		opusOneShot = false;
 		planningActive = false;
-		floorTier = DEFAULT_FLOOR;
 		sessionRouteLog = [];
 
 		const modelId = ctx.model?.id ?? "";
 		const launch = (Object.entries(TIER_MODELS) as [Tier, string][]).find(([, id]) => modelId === id);
 		currentTier = launch ? launch[0] : ("__unknown__" as Tier);
+
+		// If a specific tier is detected from ctx.model (whether from CLI --session,
+		// /resume within Pi, or fork), preserve it as the floor/pin.
+		// Only reset to default floor when:
+		//   - A fresh startup where no specific model is detected, OR
+		//   - An explicit /router reset command
+		if (launch) {
+			floorTier = launch[0];
+			pinnedTier = launch[0];
+		} else {
+			// No specific tier detected — fresh startup or unknown model.
+			pinnedTier = null;
+			floorTier = DEFAULT_FLOOR;
+		}
 	});
 
 	// ─── Before Agent Start: apply resting tier, or consume a one-shot ──────
@@ -209,18 +247,50 @@ export default function (pi: ExtensionAPI) {
 
 		const text = extractLastAssistantText(event.messages ?? []);
 		const parsed = parseFloor(text);
+		const subagentTasks = parseSubagentTasks(text);
+
 		// If the planner forgot the marker, default to sonnet — planned work is
 		// rarely trivial, and we'd rather over- than under-provision here.
 		floorTier = parsed ?? "sonnet";
 		pinnedTier = null;
 
 		const switched = await setTier(floorTier, `plan floor: ${floorTier}`, ctx);
-		ctx.ui?.notify?.(
-			`📋 Plan ready. Floor → ${TIER_LABELS[floorTier]}${parsed ? "" : " (default — no marker found)"}. Auto-routing resumed.`,
-			"info",
-		);
 		if (switched) ctx.ui?.setStatus?.("router", TIER_LABELS[floorTier]);
+
+		const validTasks = subagentTasks.filter(
+			({ agent }) => (TIER_ORDER as string[]).includes(agent) && isTierAtOrAbove(agent as Tier, floorTier),
+		);
+
+		const floorMsg = `📋 Plan ready. Floor → ${TIER_LABELS[floorTier]}${parsed ? "" : " (default — no marker found)"}.`;
+
+		if (validTasks.length === 0) {
+			ctx.ui?.notify?.(`${floorMsg} Auto-routing resumed.`, "info");
+			return;
+		}
+
+		ctx.ui?.notify?.(floorMsg, "info");
+
+		const summary = validTasks.map((t, i) => `${i + 1}. [${t.agent}] ${t.task}`).join("\n\n");
+		const runNow = ctx.ui?.confirm
+			? await ctx.ui.confirm(`Run ${validTasks.length} subagent task${validTasks.length > 1 ? "s" : ""} in parallel?`, summary)
+			: false;
+
+		if (runNow) {
+			const taskLines = validTasks
+				.map((t) => `  - agent: "${t.agent}", task: "${t.task.replace(/"/g, '\\"')}"`)
+				.join("\n");
+			pi.sendUserMessage(
+				[
+					"Execute the following subagent tasks in PARALLEL using the subagent tool's `tasks` array (one tool call, all tasks together):",
+					taskLines,
+				].join("\n"),
+				{ deliverAs: "followUp" },
+			);
+		} else {
+			ctx.ui?.notify?.("Continuing without subagents.", "info");
+		}
 	});
+
 
 	// ─── Tool Result: escalate one tier on repeated failures ────────────────
 
@@ -494,6 +564,18 @@ export default function (pi: ExtensionAPI) {
 				``,
 				`  Default floor (no plan): ${TIER_LABELS[DEFAULT_FLOOR]}`,
 				`  Current: ${TIER_LABELS[currentTier]} | Floor: ${TIER_LABELS[floorTier]} | Mode: ${mode}`,
+				``,
+				`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`,
+				`  SUBAGENT DELEGATION (automatic after /plan)`,
+				`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`,
+				`  After /plan sets a floor, if opus suggested subagent tasks at or`,
+				`  above that floor, you get a one-key confirm dialog:`,
+				``,
+				`    Run 3 subagent tasks in parallel? [y/n]`,
+				``,
+				`  Confirm to run them all in parallel via the real subagent tool —`,
+				`  no copy/pasting commands. Decline to continue in the main session`,
+				`  alone. Tasks below the floor tier are filtered out automatically.`,
 			];
 			ctx.ui.notify(help.join("\n"), "info");
 		},

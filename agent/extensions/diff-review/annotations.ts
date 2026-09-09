@@ -3,13 +3,8 @@
  * explanations of why changes were made, based on the diffs and conversation context.
  */
 
-import { complete } from "@mariozechner/pi-ai";
+import type { ExtensionCommandContext } from "@mariozechner/pi-coding-agent";
 import type { DiffReviewFile } from "./types.js";
-
-interface ReasoningContext {
-  model: any;
-  apiKey: string;
-}
 
 /**
  * Generate a unified diff summary for a file (compact, for the LLM prompt).
@@ -124,13 +119,14 @@ function parseReasoningResponse(response: string, fileCount: number): string[] {
 
 /**
  * Generate reasoning for all files using an LLM call.
- * Returns immediately with empty reasoning if the call fails.
+ * Mutates `err.message` in the thrown error if the call fails, so callers can log why.
  */
 export async function generateFileReasoning(
   files: DiffReviewFile[],
-  reasoningCtx: ReasoningContext,
+  ctx: ExtensionCommandContext,
 ): Promise<void> {
   if (files.length === 0) return;
+  if (!ctx.model) throw new Error("no active model to generate reasoning with");
 
   // Filter to files that have actual content changes
   const filesWithChanges = files.filter(
@@ -145,33 +141,30 @@ export async function generateFileReasoning(
 
   const prompt = buildReasoningPrompt(batch);
 
-  try {
-    const response = await complete(
-      reasoningCtx.model,
-      {
-        systemPrompt: "You are a senior code reviewer explaining changes to a teammate. You provide detailed reasoning about WHY code changes were made — the problem, the design decision, the trade-offs, and how it fits the bigger picture. Write in clear, direct prose. Output valid JSON only.",
-        messages: [{ role: "user" as const, content: prompt, timestamp: Date.now() }],
-      },
-      {
-        apiKey: reasoningCtx.apiKey,
-        maxTokens: 4096,
-      },
-    );
+  const response = await ctx.modelRegistry.complete(
+    ctx.model,
+    {
+      systemPrompt: "You are a senior code reviewer explaining changes to a teammate. You provide detailed reasoning about WHY code changes were made — the problem, the design decision, the trade-offs, and how it fits the bigger picture. Write in clear, direct prose. Output valid JSON only.",
+      messages: [{ role: "user" as const, content: prompt, timestamp: Date.now() }],
+    },
+    { maxTokens: 4096 },
+  );
 
-    const responseText = response.content
-      .filter((c): c is { type: "text"; text: string } => c.type === "text")
-      .map((c) => c.text)
-      .join("\n");
+  const responseText = response.content
+    .filter((c): c is { type: "text"; text: string } => c.type === "text")
+    .map((c) => c.text)
+    .join("\n");
 
-    const reasons = parseReasoningResponse(responseText, batch.length);
+  if (!responseText.trim()) {
+    throw new Error(`model returned no text content (stopReason: ${response.stopReason})`);
+  }
 
-    // Assign reasoning to files
-    for (let i = 0; i < batch.length; i++) {
-      if (reasons[i]) {
-        batch[i].reasoning = [reasons[i]];
-      }
+  const reasons = parseReasoningResponse(responseText, batch.length);
+
+  // Assign reasoning to files
+  for (let i = 0; i < batch.length; i++) {
+    if (reasons[i]) {
+      batch[i].reasoning = [reasons[i]];
     }
-  } catch {
-    // Non-fatal: if LLM call fails, files just won't have reasoning
   }
 }

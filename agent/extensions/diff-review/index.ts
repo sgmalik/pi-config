@@ -270,20 +270,16 @@ export default function (pi: ExtensionAPI) {
     }
 
     // Generate per-file reasoning using LLM
-    try {
-      if (ctx.model) {
-        const auth = await ctx.modelRegistry.getApiKeyAndHeaders(ctx.model);
-        if (auth.ok) {
-          log(ctx, `Generating reasoning for ${files.length} file(s)...`);
-          await generateFileReasoning(files, {
-            model: ctx.model,
-            apiKey: auth.apiKey!,
-          });
-        }
+    if (!ctx.model) {
+      log(ctx, "Reasoning generation skipped: no active model.", "warning");
+    } else {
+      try {
+        log(ctx, `Generating reasoning for ${files.length} file(s)...`);
+        await generateFileReasoning(files, ctx);
+      } catch (err) {
+        // Non-fatal: proceed without reasoning, but surface why it failed
+        log(ctx, `Reasoning generation failed: ${err instanceof Error ? err.message : String(err)}`, "warning");
       }
-    } catch (err) {
-      // Non-fatal: if reasoning generation fails, proceed without it
-      log(ctx, `Reasoning generation skipped: ${err instanceof Error ? err.message : String(err)}`, "warning");
     }
 
     const html = buildReviewHtml({ repoRoot, files });
