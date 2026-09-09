@@ -224,6 +224,7 @@ export default function (pi: ExtensionAPI) {
 	pi.on("before_agent_start", async (_event: any, ctx: any) => {
 		if (!routerEnabled) return;
 		if (planningActive) return; // stay on opus during the plan turn
+		if (currentTier === ("__unknown__" as Tier)) return; // don't override unrecognized/custom models
 
 		consecutiveErrors = 0;
 
