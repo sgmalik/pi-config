@@ -38,6 +38,13 @@
  * cost, and moving it back restores it.
  *
  * Tool selection persists across session reloads and respects branch navigation.
+ *
+ * Reconciliation: any tool name never seen before (e.g. a package that
+ * finishes async activation after session_start already snapshotted a
+ * smaller set) is auto-enabled the first time it's noticed - at session
+ * start/tree/fork, and again whenever /tools is opened, so a slow-loading
+ * package on a fresh machine can't get stuck showing as "disabled" just
+ * because it registered a beat later than everything else.
  */
 
 import type { ExtensionAPI, ExtensionContext, ToolInfo } from "@mariozechner/pi-coding-agent";
@@ -133,6 +140,7 @@ function scanAgentMeta(filePath: string): { name?: string; description?: string 
 // State persisted to session
 interface ToolsState {
 	enabledTools: string[];
+	knownTools: string[];
 }
 
 // Tools disabled by default on a brand-new session/branch with no prior
@@ -177,15 +185,36 @@ function moveFile(from: string, to: string) {
 }
 
 export default function toolsExtension(pi: ExtensionAPI) {
-	// Track enabled tools
+	// Track enabled tools, and every tool name we've ever reconciled at least
+	// once (distinguishes "explicitly turned off" from "never seen yet" - only
+	// the latter gets auto-enabled when it shows up).
 	let enabledTools: Set<string> = new Set();
+	let knownTools: Set<string> = new Set();
 	let allTools: ToolInfo[] = [];
 
 	// Persist current state
 	function persistState() {
 		pi.appendEntry<ToolsState>("tools-config", {
 			enabledTools: Array.from(enabledTools),
+			knownTools: Array.from(knownTools),
 		});
+	}
+
+	// Auto-enable any tool name that's newly appeared in the registry since we
+	// last looked (e.g. a package finishing async activation after our
+	// session_start snapshot ran), unless it's a default-off tool. Returns true
+	// if anything changed (caller decides whether to persist/apply).
+	function reconcileNewTools(): boolean {
+		let changed = false;
+		for (const tool of allTools) {
+			if (knownTools.has(tool.name)) continue;
+			knownTools.add(tool.name);
+			if (!DEFAULT_DISABLED_TOOLS.has(tool.name)) {
+				enabledTools.add(tool.name);
+			}
+			changed = true;
+		}
+		return changed;
 	}
 
 	// Apply current tool selection
@@ -200,13 +229,13 @@ export default function toolsExtension(pi: ExtensionAPI) {
 		// Get entries in current branch only
 		const branchEntries = ctx.sessionManager.getBranch();
 		let savedTools: string[] | undefined;
+		let savedKnown: string[] | undefined;
 
 		for (const entry of branchEntries) {
 			if (entry.type === "custom" && entry.customType === "tools-config") {
 				const data = entry.data as ToolsState | undefined;
-				if (data?.enabledTools) {
-					savedTools = data.enabledTools;
-				}
+				if (data?.enabledTools) savedTools = data.enabledTools;
+				if (data?.knownTools) savedKnown = data.knownTools;
 			}
 		}
 
@@ -214,10 +243,14 @@ export default function toolsExtension(pi: ExtensionAPI) {
 			// Restore saved tool selection (filter to only tools that still exist)
 			const allToolNames = allTools.map((t) => t.name);
 			enabledTools = new Set(savedTools.filter((t: string) => allToolNames.includes(t)));
+			knownTools = new Set(savedKnown ?? savedTools);
+			const changed = reconcileNewTools();
 			applyTools();
+			if (changed) persistState();
 		} else {
 			// No saved state - sync with currently active tools, minus defaults-off
 			enabledTools = new Set(pi.getActiveTools().filter((t) => !DEFAULT_DISABLED_TOOLS.has(t)));
+			knownTools = new Set(allTools.map((t) => t.name));
 			applyTools();
 			persistState();
 		}
@@ -243,8 +276,13 @@ export default function toolsExtension(pi: ExtensionAPI) {
 	pi.registerCommand("tools", {
 		description: "Enable/disable tools, move extension files between active/optional (project + global)",
 		handler: async (_args, ctx) => {
-			// Refresh tool list
+			// Refresh tool list, and pick up anything registered since our last
+			// reconcile (e.g. a package that finished loading after session_start).
 			allTools = pi.getAllTools();
+			if (reconcileNewTools()) {
+				applyTools();
+				persistState();
+			}
 			const scopes = scopesFor(ctx.cwd);
 			const agentScopes = agentScopesFor(ctx.cwd);
 
