@@ -19,6 +19,10 @@
  * 7. Project Optional Agents        - .md agents sitting in <cwd>/.pi/optional-agents/.
  * 8. Global Active Agents           - .md agents in ~/.pi/agent/agents/.
  * 9. Global Optional Agents         - .md agents sitting in ~/.pi/agent/optional-agents/.
+ * 10. Project Active Prompts        - .md prompts in <cwd>/.pi/prompts/.
+ * 11. Project Optional Prompts      - .md prompts in <cwd>/.pi/optional-prompts/.
+ * 12. Global Active Prompts         - .md prompts in ~/.pi/agent/prompts/.
+ * 13. Global Optional Prompts       - .md prompts in ~/.pi/agent/optional-prompts/.
  *
  * For each Active Extensions section, per-tool toggles work like section 1
  * (no I/O), and each file also gets a "move to optional" action that
@@ -29,12 +33,11 @@
  * default to inactive (zero context cost) until toggled on individually in
  * the matching Active section.
  *
- * Agent sections work the same way but one level simpler: each .md file is
- * exactly one agent (no per-tool sub-toggle), so "move to optional"/"move to
- * active" is the only action. The subagent tool's built-in agent discovery
- * (~/.pi/agent/agents or <cwd>/.pi/agents) only ever sees whatever .md files
- * are physically present, so moving a file out of the active dir removes it
- * from the subagent tool's schema description on next reload at zero code
+ * Agent and prompt sections work the same way but one level simpler: each .md
+ * file is exactly one item (no per-tool sub-toggle), so "move to optional"/
+ * "move to active" is the only action. The subagent and prompt-template
+ * discovery systems only ever see whatever .md files are physically present in
+ * their active dirs, so moving a file out removes it on next reload at zero code
  * cost, and moving it back restores it.
  *
  * Tool selection persists across session reloads and respects branch navigation.
@@ -90,6 +93,13 @@ interface AgentScopeDirs {
 	optionalAgentsDir: string;
 }
 
+interface PromptScopeDirs {
+	key: "project" | "global";
+	label: string;
+	promptsDir: string;
+	optionalPromptsDir: string;
+}
+
 function agentScopesFor(cwd: string): AgentScopeDirs[] {
 	return [
 		{
@@ -107,19 +117,36 @@ function agentScopesFor(cwd: string): AgentScopeDirs[] {
 	];
 }
 
-function isAgentFile(name: string): boolean {
+function promptScopesFor(cwd: string): PromptScopeDirs[] {
+	return [
+		{
+			key: "project",
+			label: "Project",
+			promptsDir: path.join(cwd, ".pi", "prompts"),
+			optionalPromptsDir: path.join(cwd, ".pi", "optional-prompts"),
+		},
+		{
+			key: "global",
+			label: "Global",
+			promptsDir: path.join(os.homedir(), ".pi", "agent", "prompts"),
+			optionalPromptsDir: path.join(os.homedir(), ".pi", "agent", "optional-prompts"),
+		},
+	];
+}
+
+function isMarkdownFile(name: string): boolean {
 	return name.endsWith(".md") && !name.startsWith(".");
 }
 
-function listAgentFiles(dir: string): string[] {
+function listMarkdownFiles(dir: string): string[] {
 	try {
-		return fs.readdirSync(dir).filter(isAgentFile).sort();
+		return fs.readdirSync(dir).filter(isMarkdownFile).sort();
 	} catch {
 		return [];
 	}
 }
 
-// Best-effort read of an agent .md file's frontmatter name/description, for
+// Best-effort read of an agent or prompt .md file's frontmatter name/description, for
 // display only - the move action still operates on the whole file.
 function scanAgentMeta(filePath: string): { name?: string; description?: string } {
 	try {
@@ -285,6 +312,7 @@ export default function toolsExtension(pi: ExtensionAPI) {
 			}
 			const scopes = scopesFor(ctx.cwd);
 			const agentScopes = agentScopesFor(ctx.cwd);
+			const promptScopes = promptScopesFor(ctx.cwd);
 
 			await ctx.ui.custom((tui, theme, _kb, done) => {
 				const header = (label: string): SettingItem => ({
@@ -363,7 +391,7 @@ export default function toolsExtension(pi: ExtensionAPI) {
 
 					for (const s of agentScopes) {
 						items.push(header(`── ${s.label} Active Agents (${tildeify(s.agentsDir)}) ──`));
-						const activeAgentFiles = listAgentFiles(s.agentsDir);
+						const activeAgentFiles = listMarkdownFiles(s.agentsDir);
 						if (activeAgentFiles.length === 0) {
 							items.push({ id: `__none_active_agents_${s.key}__`, label: "(none)", currentValue: "" });
 						}
@@ -382,7 +410,7 @@ export default function toolsExtension(pi: ExtensionAPI) {
 						}
 
 						items.push(header(`── ${s.label} Optional Agents (${tildeify(s.optionalAgentsDir)}) ──`));
-						const optionalAgentFiles = listAgentFiles(s.optionalAgentsDir);
+						const optionalAgentFiles = listMarkdownFiles(s.optionalAgentsDir);
 						if (optionalAgentFiles.length === 0) {
 							items.push({ id: `__none_optional_agents_${s.key}__`, label: "(none)", currentValue: "" });
 						}
@@ -394,6 +422,44 @@ export default function toolsExtension(pi: ExtensionAPI) {
 								: fileName;
 							items.push({
 								id: `agent-move-to-active::${s.key}::${fileName}`,
+								label,
+								currentValue: "inactive",
+								values: ["inactive", "move to active"],
+							});
+						}
+					}
+
+					for (const s of promptScopes) {
+						items.push(header(`── ${s.label} Active Prompts (${tildeify(s.promptsDir)}) ──`));
+						const activePromptFiles = listMarkdownFiles(s.promptsDir);
+						if (activePromptFiles.length === 0) {
+							items.push({ id: `__none_active_prompts_${s.key}__`, label: "(none)", currentValue: "" });
+						}
+						for (const fileName of activePromptFiles) {
+							const fullPath = path.join(s.promptsDir, fileName);
+							const meta = scanAgentMeta(fullPath);
+							const command = `/${path.basename(fileName, ".md")}`;
+							const label = `${command}${meta.description ? ` — ${meta.description}` : ""}`;
+							items.push({
+								id: `prompt-move-to-optional::${s.key}::${fileName}`,
+								label,
+								currentValue: "active",
+								values: ["active", "move to optional"],
+							});
+						}
+
+						items.push(header(`── ${s.label} Optional Prompts (${tildeify(s.optionalPromptsDir)}) ──`));
+						const optionalPromptFiles = listMarkdownFiles(s.optionalPromptsDir);
+						if (optionalPromptFiles.length === 0) {
+							items.push({ id: `__none_optional_prompts_${s.key}__`, label: "(none)", currentValue: "" });
+						}
+						for (const fileName of optionalPromptFiles) {
+							const fullPath = path.join(s.optionalPromptsDir, fileName);
+							const meta = scanAgentMeta(fullPath);
+							const command = `/${path.basename(fileName, ".md")}`;
+							const label = `${command}${meta.description ? ` — ${meta.description}` : ""}`;
+							items.push({
+								id: `prompt-move-to-active::${s.key}::${fileName}`,
 								label,
 								currentValue: "inactive",
 								values: ["inactive", "move to active"],
@@ -415,6 +481,31 @@ export default function toolsExtension(pi: ExtensionAPI) {
 				);
 
 				function onChange(id: string, newValue: string) {
+					if (id.startsWith("prompt-move-to-optional::") || id.startsWith("prompt-move-to-active::")) {
+						const toOptional = id.startsWith("prompt-move-to-optional::");
+						const [, scopeKey, fileName] = id.split("::");
+						const s = promptScopes.find((sc) => sc.key === scopeKey);
+						if (!s) return;
+
+						const from = toOptional ? path.join(s.promptsDir, fileName) : path.join(s.optionalPromptsDir, fileName);
+						const to = toOptional ? path.join(s.optionalPromptsDir, fileName) : path.join(s.promptsDir, fileName);
+
+						try {
+							moveFile(from, to);
+							done(undefined);
+							ctx.ui.notify(
+								`${toOptional ? "Deactivated" : "Activated"} prompt /${path.basename(fileName, ".md")} (${s.label}). Reloading extensions…`,
+								"info",
+							);
+							void ctx.reload().then(() => {
+								ctx.ui.notify(`Reloaded. Run /tools again to review prompts.`, "info");
+							});
+						} catch (err) {
+							ctx.ui.notify(`Failed to move ${fileName}: ${(err as Error).message}`, "error");
+						}
+						return;
+					}
+
 					if (id.startsWith("agent-move-to-optional::") || id.startsWith("agent-move-to-active::")) {
 						const toOptional = id.startsWith("agent-move-to-optional::");
 						const [, scopeKey, fileName] = id.split("::");
