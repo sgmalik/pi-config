@@ -16,8 +16,8 @@
 
 ## Search
 
-- In-repo: `ffgrep` (contents), `fffind` (paths). After 1-2 results, read the top match.
-- Outside repo: `fd -g "name" ~` or `rg` at `/opt/homebrew/bin/rg`
+- Use `ffgrep` (contents) and `fffind` (paths) for all searches, in-repo or outside. Not raw bash grep/find.
+- After 1-2 results, read the top match.
 
 ## GitNexus
 
