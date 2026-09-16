@@ -70,6 +70,19 @@ Personal configuration, extensions, agents, and themes for the [Pi coding agent]
 | Theme                  | `midnight-ocean` |
 | Default thinking level | `medium`         |
 
+## Provider-aware Routing
+
+Model tiers are configured in `agent/router-models.json`.
+
+| Tier | Codex | Bedrock |
+|------|-------|---------|
+| `fast` | `gpt-5.6-luna` | Haiku AIP |
+| `balanced` | `gpt-5.6-terra` | Sonnet AIP |
+| `strong` | `gpt-5.6-sol` | Sonnet AIP |
+| `planner` | `gpt-6-astra` | Opus AIP |
+
+Active tier agents live in `agent/agents/{fast,balanced,strong,planner}.md` and are synced from `agent/provider-agents/<activeProfile>/`. Use `/router profile codex|bedrock` to switch profiles and `/router validate` to check the active profile.
+
 ## Active Extensions
 
 Extensions in `extensions/` are auto-loaded on startup.
@@ -78,7 +91,7 @@ Extensions in `extensions/` are auto-loaded on startup.
 
 | Extension | Description |
 |-----------|-------------|
-| **router** | Tool and subagent routing. Delegates to specialized agents based on task context. |
+| **router** | Provider-aware tier routing (`fast`, `balanced`, `strong`, `planner`) driven by `router-models.json`. `/plan` runs on the configured planner tier, then downgrades to the assessed floor. |
 | **gitnexus** | GitNexus integration for code knowledge graph queries and impact analysis. |
 | **refactor-router** | Routes refactor operations to appropriate agents and handles code transformations. |
 
@@ -87,7 +100,7 @@ Extensions in `extensions/` are auto-loaded on startup.
 | Extension | Description |
 |-----------|-------------|
 | **cost** | `/cost [days]` — API cost summary with breakdown by date, model, and project. |
-| **custom-compaction** | Replaces default compaction with full-context summary using AWS Bedrock Haiku. `/compaction` shows last result. |
+| **custom-compaction** | Replaces default compaction with full-context summary using the active router profile's configured compaction tier. `/compaction` shows last result. |
 | **trigger-compact** | Auto-triggers compaction when context exceeds 150k tokens at agent end. |
 | **tool-counter** | Rich two-line footer: model + context meter, tokens in/out, cost, cwd with git branch, and tool call tally. |
 | **tools** | `/tools` — interactive tool selector to enable/disable tools. Persists across session reloads. |

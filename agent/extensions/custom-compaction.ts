@@ -3,12 +3,12 @@
  *
  * Customizes compaction summarization:
  * 1. Summarizes messagesToSummarize + turnPrefixMessages (the split-turn straddle)
- *    using AWS Bedrock Sonnet 5 instead of the default conversation model.
+ *    using the active router profile's configured compaction tier.
  * 2. Reuses the boundary computed from `keepRecentTokens` (settings.json) for
  *    which messages stay raw/kept — this extension does NOT change that boundary.
  *    To shrink the raw-kept window, lower `keepRecentTokens` in settings.json.
  *
- * Sonnet is used rather than a cheaper/smaller model because the generated summary
+ * The compaction tier should be at least balanced because the generated summary
  * is the ONLY surviving record of everything before the cut point — a lossy summary
  * here silently degrades every future turn with no way to recover the lost detail.
  *
@@ -17,12 +17,32 @@
  */
 
 import { complete } from "@mariozechner/pi-ai";
+import * as fs from "node:fs";
+import * as path from "node:path";
+import { homedir } from "node:os";
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import { DynamicBorder, getMarkdownTheme, convertToLlm, serializeConversation } from "@mariozechner/pi-coding-agent";
 import { Container, Key, Markdown, matchesKey, Text, truncateToWidth, visibleWidth } from "@mariozechner/pi-tui";
 
 // Store the last compaction result for the /compaction command
 let lastCompaction: { summary: string; source: string; tokensBefore: string; summaryLength: number; timestamp: string } | undefined;
+
+const ROUTER_CONFIG_PATH = path.join(homedir(), ".pi", "agent", "router-models.json");
+
+function getCompactionModel(ctx: any): { model: any; label: string } | undefined {
+	try {
+		const config = JSON.parse(fs.readFileSync(ROUTER_CONFIG_PATH, "utf-8"));
+		const profile = config.profiles?.[config.activeProfile];
+		const tierName = profile?.compactionTier ?? profile?.defaultFloor;
+		const tier = profile?.tiers?.[tierName];
+		if (!profile?.provider || !tier?.id) return undefined;
+		const found = ctx.modelRegistry.find(profile.provider, tier.id);
+		if (!found) return undefined;
+		return { model: { ...found, ...tier.overrides }, label: tier.label ?? `${profile.provider}/${tier.id}` };
+	} catch {
+		return undefined;
+	}
+}
 
 export default function (pi: ExtensionAPI) {
 	// Restore last compaction from session entries on startup/resume
@@ -31,7 +51,7 @@ export default function (pi: ExtensionAPI) {
 		// Scan for the last compaction entry (built into the session format, type: "compaction")
 		for (const entry of entries) {
 			if (entry.type === "compaction" && entry.summary) {
-				const source = entry.fromHook ? "custom (Bedrock Sonnet 5)" : "built-in";
+				const source = entry.fromHook ? "custom (router compaction tier)" : "built-in";
 				const tokensBefore = typeof entry.tokensBefore === "number" ? entry.tokensBefore.toLocaleString() : String(entry.tokensBefore);
 				lastCompaction = {
 					summary: entry.summary,
@@ -75,7 +95,7 @@ export default function (pi: ExtensionAPI) {
 		if (!ctx.hasUI) return;
 
 		const { compactionEntry, fromExtension } = event;
-		const source = fromExtension ? "custom (Bedrock Sonnet 5)" : "built-in";
+		const source = fromExtension ? "custom (router compaction tier)" : "built-in";
 		const summaryLength = compactionEntry.summary.length;
 		const tokensBefore = compactionEntry.tokensBefore.toLocaleString();
 		const timestamp = new Date(compactionEntry.timestamp).toLocaleTimeString();
@@ -340,18 +360,19 @@ export default function (pi: ExtensionAPI) {
 		const { preparation, branchEntries: _, signal } = event;
 		const { messagesToSummarize, turnPrefixMessages, tokensBefore, firstKeptEntryId, previousSummary } = preparation;
 
-		// Use AWS Bedrock Sonnet 5 for summarization — the summary is the only surviving
-		// record of everything before the cut point, so we don't skimp on quality here.
-		const model = ctx.modelRegistry.find("amazon-bedrock", "us.anthropic.claude-sonnet-5");
-		if (!model) {
-			ctx.ui.notify(`Could not find AWS Bedrock Sonnet 5 model, using default compaction`, "warning");
+		// Use the active router profile's compaction tier. The summary is the only
+		// surviving record before the cut point, so this should be at least balanced.
+		const configured = getCompactionModel(ctx);
+		if (!configured) {
+			ctx.ui.notify(`Could not resolve configured compaction model, using default compaction`, "warning");
 			return;
 		}
+		const { model, label: compactionLabel } = configured;
 
 		// getApiKeyAndHeaders() returns { ok, apiKey?, headers? } or { ok: false, error }
 		const auth = await ctx.modelRegistry.getApiKeyAndHeaders(model);
 		if (!auth.ok) {
-			ctx.ui.notify(`Could not get AWS Bedrock credentials: ${auth.error}. Using default compaction`, "warning");
+			ctx.ui.notify(`Could not get credentials for configured compaction model: ${auth.error}. Using default compaction`, "warning");
 			return;
 		}
 		const apiKey = auth.apiKey;
@@ -365,7 +386,7 @@ export default function (pi: ExtensionAPI) {
 		}
 
 		ctx.ui.notify(
-			`Custom compaction: summarizing ${allMessages.length} messages (${tokensBefore.toLocaleString()} tokens) with AWS Bedrock Sonnet 5...`,
+			`Custom compaction: summarizing ${allMessages.length} messages (${tokensBefore.toLocaleString()} tokens) with ${compactionLabel}...`,
 			"info",
 		);
 

@@ -1,107 +1,93 @@
 /**
- * Model Router Extension — floor-based deterministic routing
+ * Provider-aware Model Router Extension
  *
- * Routing is driven by explicit mechanisms only — no per-prompt scoring:
- *
- *   1. /plan <task>  — pin opus, produce a task manifest, and let opus judge
- *                      the implementation complexity. It emits an
- *                      IMPLEMENTATION_FLOOR, we drop to that floor, and
- *                      auto-routing resumes anchored to it.
- *   2. Floor         — the base tier for the current task. Clamps the minimum
- *                      so mid-task clarifying prompts can't downgrade you.
- *   3. Slash pins    — /nova /haiku /sonnet pin a tier (sticky, until
- *                      /router auto). /router escalate moves up one tier.
- *   4. /opus         — one-shot spike: runs the next turn on opus, then falls
- *                      back to the floor (or the active pin).
- *
- * Tiers (command name → model):
- *   nova   → Nova Micro        $0.035/$0.14 (cached: ~$0.004/M)
- *   haiku  → Claude Haiku 4.5  $0.80/$4.00  (cached: $0.08/M)
- *   sonnet → Claude Sonnet 5   $3.00/$15.00 (cached: $0.30/M)
- *   opus   → Claude Opus 4.8   $15.00/$75.00 (cached: $1.50/M)
+ * Routing uses provider-neutral tiers from ~/.pi/agent/router-models.json:
+ *   fast      — cheap/simple work
+ *   balanced  — default production work
+ *   strong    — complex implementation/security/architecture
+ *   planner   — /plan only, highest-reasoning planning tier
  *
  * Commands:
- *   /plan <task>        Plan on opus, then downgrade to the assessed floor
- *   /nova /haiku /sonnet  Pin a tier (sticky)
- *   /opus [prompt]      One-shot opus spike (this turn only)
- *   /router [status|on|off|escalate|floor <name>|auto|log|reset]
+ *   /plan <task>        Plan on configured planner tier, then drop to floor
+ *   /fast               Pin fast tier
+ *   /balanced           Pin balanced tier
+ *   /strong             Pin strong tier
+ *   /router ...         status/profile/floor/auto/escalate/reset/validate/log
  *   /routes             Full command reference
- *
- * Usage: pi -e extensions/router.ts
  */
 
+import * as fs from "node:fs";
+import * as path from "node:path";
+import { homedir } from "node:os";
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 
-// ─── Model Tier Definitions ─────────────────────────────────────────────────
+type Tier = "fast" | "balanced" | "strong" | "planner";
+type FloorTier = Exclude<Tier, "planner">;
 
-type Tier = "nova" | "haiku" | "sonnet" | "opus";
+interface TierConfig {
+	id: string;
+	label: string;
+	cost?: string;
+	overrides?: Record<string, any>;
+}
 
-const TIER_ORDER: Tier[] = ["nova", "haiku", "sonnet", "opus"];
+interface ProviderProfile {
+	provider: string;
+	defaultFloor: FloorTier;
+	planningTier: Tier;
+	compactionTier?: Tier;
+	tiers: Record<Tier, TierConfig>;
+}
 
-// Ad-hoc base tier when no plan is active.
-const DEFAULT_FLOOR: Tier = "haiku";
+interface RouterConfig {
+	activeProfile: string;
+	profiles: Record<string, ProviderProfile>;
+}
 
-// Floor the planner may pick (opus is never a floor — it's plan/spike only).
-const FLOOR_CHOICES: Tier[] = ["nova", "haiku", "sonnet"];
+const CONFIG_PATH = path.join(homedir(), ".pi", "agent", "router-models.json");
+const AGENT_DIR = path.join(homedir(), ".pi", "agent", "agents");
+const PROVIDER_AGENTS_DIR = path.join(homedir(), ".pi", "agent", "provider-agents");
+const TIER_ORDER: Tier[] = ["fast", "balanced", "strong", "planner"];
+const FLOOR_CHOICES: FloorTier[] = ["fast", "balanced", "strong"];
 
-const TIER_MODELS: Record<Tier, string> = {
-	nova: "amazon.nova-micro-v1:0",
-	haiku: "arn:aws:bedrock:us-east-1:472598590798:application-inference-profile/1xd0f80p0sob",
-	sonnet: "arn:aws:bedrock:us-east-1:472598590798:application-inference-profile/ov5vdsffeznl",
-	opus: "arn:aws:bedrock:us-east-1:472598590798:application-inference-profile/xsahe8qo68zv",
-};
+function loadConfig(): RouterConfig {
+	return JSON.parse(fs.readFileSync(CONFIG_PATH, "utf-8"));
+}
 
-const TIER_LABELS: Record<Tier, string> = {
-	nova: "⚡ Nova Micro",
-	haiku: "🧠 Claude Haiku 4.5",
-	sonnet: "🎵 Claude Sonnet 5",
-	opus: "🎭 Claude Opus 4.8",
-};
+function saveConfig(config: RouterConfig) {
+	fs.writeFileSync(CONFIG_PATH, `${JSON.stringify(config, null, 2)}\n`);
+}
 
-const TIER_COST_HINT: Record<Tier, string> = {
-	nova: "$0.035/$0.14 per M (cached: ~$0.004/M)",
-	haiku: "$0.80/$4.00 per M (cached: $0.08/M)",
-	sonnet: "$3.00/$15.00 per M (cached: $0.30/M)",
-	opus: "$15.00/$75.00 per M (cached: $1.50/M)",
-};
+function activeProfile(config = loadConfig()): ProviderProfile {
+	const profile = config.profiles[config.activeProfile];
+	if (!profile) throw new Error(`Active router profile not found: ${config.activeProfile}`);
+	return profile;
+}
 
-const TIER_MODEL_OVERRIDES: Record<Tier, Record<string, any>> = {
-	nova: { reasoning: false, name: "Nova Micro" },
-	haiku: { reasoning: true, name: "claude-haiku-4-5" },
-	// HACK: Pi only sends adaptive thinking for models whose name contains "opus-4-8" or "sonnet-4-6".
-	// Our AIPs are Sonnet 5 and Opus 4.8, but Pi doesn't know Sonnet 5's ARN yet.
-	// Without these names, thinking breaks with "thinking.type.enabled is not supported".
-	sonnet: { reasoning: true, name: "claude-sonnet-4-6" },
-	opus: { reasoning: true, name: "claude-opus-4-8" },
-};
+function tierLabel(tier: Tier, profile = activeProfile()): string {
+	return profile.tiers[tier]?.label ?? tier;
+}
 
-// ─── Planning framing ────────────────────────────────────────────────────────
-
-const PLAN_FRAMING = `[PLANNING MODE — opus]
-Analyze the user's intent and produce a task manifest. Do NOT edit or write any files yet — this turn is planning only.
-
-1. Restate the goal and any hard constraints in plain terms.
-2. Investigate the relevant code as needed (read-only tools).
-3. Produce a numbered implementation plan under a "Plan:" header.
-4. On the FINAL line, emit exactly one of the following, choosing the MINIMUM model tier the implementation work will require:
-     IMPLEMENTATION_FLOOR: nova     (trivial edits, renames, boilerplate, docs)
-     IMPLEMENTATION_FLOOR: haiku    (routine implementation, straightforward debugging)
-     IMPLEMENTATION_FLOOR: sonnet   (architecture, security, concurrency, cross-cutting or multi-file changes)
-
-5. Below the floor marker, suggest specific subagent tasks AT OR ABOVE the floor tier:
-     SUBAGENT_TASK: agent:haiku task:"<subtask>"  (only if floor is nova or haiku)
-     SUBAGENT_TASK: agent:sonnet task:"<subtask>" (only if floor is haiku or sonnet)
-     SUBAGENT_TASK: agent:opus task:"<subtask>"   (for work harder than the floor)
-     (one per line, as many as needed)
-
-The floor is the MINIMUM tier for the work. Suggest subagents at or above that tier to parallelize focused aspects. Subagent suggestions weaker than the floor will be ignored.`;
-
-// ─── Helpers ──────────────────────────────────────────────────────────────────
+function tierCost(tier: Tier, profile = activeProfile()): string {
+	return profile.tiers[tier]?.cost ?? "cost unknown";
+}
 
 function nextTier(from: Tier): Tier | null {
 	const idx = TIER_ORDER.indexOf(from);
 	if (idx < 0 || idx >= TIER_ORDER.length - 1) return null;
 	return TIER_ORDER[idx + 1];
+}
+
+function isFloorTier(tier: string): tier is FloorTier {
+	return (FLOOR_CHOICES as string[]).includes(tier);
+}
+
+function tierIndex(tier: Tier): number {
+	return TIER_ORDER.indexOf(tier);
+}
+
+function isTierAtOrAbove(tier: Tier, floor: Tier): boolean {
+	return tierIndex(tier) >= tierIndex(floor);
 }
 
 function extractLastAssistantText(messages: any[]): string {
@@ -118,67 +104,135 @@ function extractLastAssistantText(messages: any[]): string {
 	return "";
 }
 
-function parseSubagentTasks(text: string): Array<{ agent: string; task: string }> {
-	const lines = text.split("\n");
-	const tasks: Array<{ agent: string; task: string }> = [];
-	for (const line of lines) {
-		const m = line.match(/SUBAGENT_TASK:\s*agent:(\w+)\s+task:"([^"]+)"/);
-		if (m) {
-			tasks.push({ agent: m[1] as Tier, task: m[2] });
-		}
+function parseSubagentTasks(text: string): Array<{ agent: Tier; task: string }> {
+	const tasks: Array<{ agent: Tier; task: string }> = [];
+	for (const line of text.split("\n")) {
+		const m = line.match(/SUBAGENT_TASK:\s*agent:(fast|balanced|strong|planner)\s+task:"([^"]+)"/i);
+		if (m) tasks.push({ agent: m[1].toLowerCase() as Tier, task: m[2] });
 	}
 	return tasks;
 }
 
-function parseFloor(text: string): Tier | null {
-	const m = text.match(/IMPLEMENTATION_FLOOR:\s*(nova|haiku|sonnet)/i);
+function parseFloor(text: string): FloorTier | null {
+	const m = text.match(/IMPLEMENTATION_FLOOR:\s*(fast|balanced|strong)/i);
 	if (!m) return null;
-	const tier = m[1].toLowerCase() as Tier;
-	return FLOOR_CHOICES.includes(tier) ? tier : null;
+	const tier = m[1].toLowerCase();
+	return isFloorTier(tier) ? tier : null;
 }
 
-function tierIndex(tier: Tier): number {
-	return TIER_ORDER.indexOf(tier);
+function syncActiveTierAgents(profileName: string): string[] {
+	const sourceDir = path.join(PROVIDER_AGENTS_DIR, profileName);
+	const changed: string[] = [];
+	if (!fs.existsSync(sourceDir)) throw new Error(`Provider agent directory not found: ${sourceDir}`);
+	fs.mkdirSync(AGENT_DIR, { recursive: true });
+
+	for (const tier of TIER_ORDER) {
+		const source = path.join(sourceDir, `${tier}.md`);
+		const target = path.join(AGENT_DIR, `${tier}.md`);
+		if (!fs.existsSync(source)) throw new Error(`Provider agent missing: ${source}`);
+		const sourceContent = fs.readFileSync(source, "utf-8");
+		const targetContent = fs.existsSync(target) ? fs.readFileSync(target, "utf-8") : undefined;
+		if (sourceContent !== targetContent) {
+			fs.writeFileSync(target, sourceContent);
+			changed.push(`${tier}.md`);
+		}
+	}
+	return changed;
 }
 
-function isTierAtOrAbove(tier: Tier, floor: Tier): boolean {
-	return tierIndex(tier) >= tierIndex(floor);
+function validationErrors(ctx: any, config = loadConfig(), validateAll = false): string[] {
+	const errors: string[] = [];
+	if (!config.profiles[config.activeProfile]) errors.push(`activeProfile '${config.activeProfile}' does not exist`);
+
+	const profiles = validateAll
+		? Object.entries(config.profiles)
+		: Object.entries(config.profiles).filter(([name]) => name === config.activeProfile);
+	for (const [profileName, profile] of profiles) {
+		if (!profile.provider) errors.push(`${profileName}: provider is missing`);
+		if (!isFloorTier(profile.defaultFloor)) errors.push(`${profileName}: defaultFloor must be ${FLOOR_CHOICES.join("|")}`);
+		if (!TIER_ORDER.includes(profile.planningTier)) errors.push(`${profileName}: planningTier is invalid`);
+		for (const tier of TIER_ORDER) {
+			const tierConfig = profile.tiers?.[tier];
+			if (!tierConfig?.id) {
+				errors.push(`${profileName}.${tier}: id is missing`);
+				continue;
+			}
+			const found = ctx.modelRegistry?.find?.(profile.provider, tierConfig.id);
+			if (!found) errors.push(`${profileName}.${tier}: ${profile.provider}/${tierConfig.id} not found in model registry`);
+		}
+	}
+	return errors;
 }
 
-// ─── Extension Entry Point ──────────────────────────────────────────────────
+function planFraming(profile: ProviderProfile): string {
+	return `[PLANNING MODE — ${tierLabel(profile.planningTier, profile)}]
+Analyze the user's intent and produce a task manifest. Do NOT edit or write any files yet — this turn is planning only.
+
+1. Restate the goal and any hard constraints in plain terms.
+2. Investigate the relevant code as needed (read-only tools).
+3. Produce a numbered implementation plan under a "Plan:" header.
+4. On the FINAL line, emit exactly one of the following, choosing the MINIMUM model tier the implementation work will require:
+     IMPLEMENTATION_FLOOR: fast      (trivial edits, renames, boilerplate, docs, simple recon)
+     IMPLEMENTATION_FLOOR: balanced  (routine implementation, straightforward debugging, normal tests)
+     IMPLEMENTATION_FLOOR: strong    (architecture, security, concurrency, cross-cutting or multi-file changes)
+
+5. Below the floor marker, suggest specific subagent tasks AT OR ABOVE the floor tier:
+     SUBAGENT_TASK: agent:fast task:"<subtask>"      (only if floor is fast)
+     SUBAGENT_TASK: agent:balanced task:"<subtask>"  (only if floor is fast or balanced)
+     SUBAGENT_TASK: agent:strong task:"<subtask>"    (for complex implementation/review)
+     SUBAGENT_TASK: agent:planner task:"<subtask>"   (for planning/risk analysis harder than the floor)
+     (one per line, as many as needed)
+
+The floor is the MINIMUM tier for the work. Suggest subagents at or above that tier to parallelize focused aspects. Subagent suggestions weaker than the floor will be ignored.`;
+}
 
 export default function (pi: ExtensionAPI) {
-	let currentTier: Tier = DEFAULT_FLOOR;
-	let floorTier: Tier = DEFAULT_FLOOR;
-	let pinnedTier: Tier | null = null; // sticky pin via /nova /haiku /sonnet /router escalate
-	let opusOneShot = false; // armed by /opus, consumed on the next turn
-	let planningActive = false; // true while the /plan turn is running
+	let config = loadConfig();
+	let profile = activeProfile(config);
+	let currentProfileName = config.activeProfile;
+	let currentTier: Tier = profile.defaultFloor;
+	let floorTier: FloorTier = profile.defaultFloor;
+	let pinnedTier: Tier | null = null;
+	let planningActive = false;
 	let routerEnabled = true;
 	let consecutiveErrors = 0;
 	let sessionRouteLog: Array<{ time: string; from: Tier; to: Tier; reason: string }> = [];
 
-	// ─── Helper: switch to a tier ──────────────────────────────────────────
+	function reloadConfig() {
+		config = loadConfig();
+		profile = activeProfile(config);
+	}
+
+	function modelForTier(tier: Tier, ctx: any): any | null {
+		const tierConfig = profile.tiers[tier];
+		const found = ctx.modelRegistry?.find?.(profile.provider, tierConfig.id);
+		if (!found) return null;
+		return { ...found, ...tierConfig.overrides };
+	}
 
 	async function setTier(tier: Tier, reason: string, ctx: any): Promise<boolean> {
-		if (tier === currentTier) return true;
-		if (!ctx.model) {
-			ctx.ui?.notify?.("Router: no ctx.model available", "warning");
+		reloadConfig();
+		if (tier === currentTier && currentProfileName === config.activeProfile) return true;
+
+		const tierConfig = profile.tiers[tier];
+		const model = modelForTier(tier, ctx);
+		if (!model) {
+			ctx.ui?.notify?.(
+				`Router: model not found for ${config.activeProfile}.${tier}: ${profile.provider}/${tierConfig.id}. Run /router validate.`,
+				"error",
+			);
 			return false;
 		}
-
-		const model = { ...ctx.model, id: TIER_MODELS[tier], ...TIER_MODEL_OVERRIDES[tier] };
 
 		try {
 			const result = await pi.setModel(model);
 			if (result === false) {
-				ctx.ui?.notify?.(
-					`Router: setModel returned false for ${TIER_LABELS[tier]} (auth?). ID: ${model.id?.slice(0, 40)}`,
-					"warning",
-				);
+				ctx.ui?.notify?.(`Router: setModel returned false for ${tierLabel(tier, profile)}`, "warning");
 				return false;
 			}
 			const oldTier = currentTier;
 			currentTier = tier;
+			currentProfileName = config.activeProfile;
 			sessionRouteLog.push({ time: new Date().toLocaleTimeString(), from: oldTier, to: tier, reason });
 			return true;
 		} catch (err: any) {
@@ -187,59 +241,50 @@ export default function (pi: ExtensionAPI) {
 		}
 	}
 
-	// The resting tier the router falls back to: an active pin, else the floor.
 	function restingTier(): Tier {
 		return pinnedTier ?? floorTier;
 	}
 
-	// ─── Session Start ─────────────────────────────────────────────────────
+	function setRouterStatus(ctx: any, suffix = "") {
+		ctx.ui?.setStatus?.("router", `${tierLabel(currentTier, profile)}${suffix}`);
+	}
 
-	pi.on("session_start", (event: any, ctx: any) => {
+	pi.on("session_start", (_event: any, ctx: any) => {
+		reloadConfig();
 		consecutiveErrors = 0;
-		opusOneShot = false;
 		planningActive = false;
 		sessionRouteLog = [];
+		pinnedTier = null;
+		floorTier = profile.defaultFloor;
+
+		try {
+			const changed = syncActiveTierAgents(config.activeProfile);
+			if (changed.length > 0) ctx.ui?.notify?.(`Router synced ${config.activeProfile} tier agents: ${changed.join(", ")}`, "info");
+		} catch (err: any) {
+			ctx.ui?.notify?.(`Router agent sync failed: ${err?.message || err}`, "warning");
+		}
 
 		const modelId = ctx.model?.id ?? "";
-		const launch = (Object.entries(TIER_MODELS) as [Tier, string][]).find(([, id]) => modelId === id);
-		currentTier = launch ? launch[0] : ("__unknown__" as Tier);
-
-		// If a specific tier is detected from ctx.model (whether from CLI --session,
-		// /resume within Pi, or fork), preserve it as the floor/pin.
-		// Only reset to default floor when:
-		//   - A fresh startup where no specific model is detected, OR
-		//   - An explicit /router reset command
-		if (launch) {
-			floorTier = launch[0];
-			pinnedTier = launch[0];
-		} else {
-			// No specific tier detected — fresh startup or unknown model.
-			pinnedTier = null;
-			floorTier = DEFAULT_FLOOR;
+		const launch = (Object.entries(profile.tiers) as [Tier, TierConfig][]).find(([, t]) => t.id === modelId)?.[0];
+		currentProfileName = config.activeProfile;
+		currentTier = launch ?? profile.defaultFloor;
+		if (launch && isFloorTier(launch)) {
+			floorTier = launch;
+			pinnedTier = launch;
 		}
+		setRouterStatus(ctx);
 	});
-
-	// ─── Before Agent Start: apply resting tier, or consume a one-shot ──────
 
 	pi.on("before_agent_start", async (_event: any, ctx: any) => {
 		if (!routerEnabled) return;
-		if (planningActive) return; // stay on opus during the plan turn
-
+		if (planningActive) return;
 		consecutiveErrors = 0;
 
-		// One-shot opus: applies to THIS turn only, then falls back to the
-		// resting tier (pin or floor). Consume the flag so it doesn't persist.
-		const spike = opusOneShot;
-		opusOneShot = false;
-
-		const target: Tier = spike ? "opus" : restingTier();
-		const reason = spike ? "opus one-shot" : pinnedTier ? `pinned (${pinnedTier})` : `floor (${floorTier})`;
-
+		const target = restingTier();
+		const reason = pinnedTier ? `pinned (${pinnedTier})` : `floor (${floorTier})`;
 		const switched = await setTier(target, reason, ctx);
-		if (switched) ctx.ui?.setStatus?.("router", TIER_LABELS[target]);
+		if (switched) setRouterStatus(ctx);
 	});
-
-	// ─── Agent End: on a planning turn, parse the floor and downgrade ───────
 
 	pi.on("agent_end", async (event: any, ctx: any) => {
 		if (!planningActive) return;
@@ -249,19 +294,14 @@ export default function (pi: ExtensionAPI) {
 		const parsed = parseFloor(text);
 		const subagentTasks = parseSubagentTasks(text);
 
-		// If the planner forgot the marker, default to sonnet — planned work is
-		// rarely trivial, and we'd rather over- than under-provision here.
-		floorTier = parsed ?? "sonnet";
+		floorTier = parsed ?? "strong";
 		pinnedTier = null;
 
 		const switched = await setTier(floorTier, `plan floor: ${floorTier}`, ctx);
-		if (switched) ctx.ui?.setStatus?.("router", TIER_LABELS[floorTier]);
+		if (switched) setRouterStatus(ctx);
 
-		const validTasks = subagentTasks.filter(
-			({ agent }) => (TIER_ORDER as string[]).includes(agent) && isTierAtOrAbove(agent as Tier, floorTier),
-		);
-
-		const floorMsg = `📋 Plan ready. Floor → ${TIER_LABELS[floorTier]}${parsed ? "" : " (default — no marker found)"}.`;
+		const validTasks = subagentTasks.filter(({ agent }) => isTierAtOrAbove(agent, floorTier));
+		const floorMsg = `📋 Plan ready. Floor → ${tierLabel(floorTier, profile)}${parsed ? "" : " (default — no marker found)"}.`;
 
 		if (validTasks.length === 0) {
 			ctx.ui?.notify?.(`${floorMsg} Auto-routing resumed.`, "info");
@@ -269,7 +309,6 @@ export default function (pi: ExtensionAPI) {
 		}
 
 		ctx.ui?.notify?.(floorMsg, "info");
-
 		const summary = validTasks.map((t, i) => `${i + 1}. [${t.agent}] ${t.task}`).join("\n\n");
 		const runNow = ctx.ui?.confirm
 			? await ctx.ui.confirm(`Run ${validTasks.length} subagent task${validTasks.length > 1 ? "s" : ""} in parallel?`, summary)
@@ -291,12 +330,8 @@ export default function (pi: ExtensionAPI) {
 		}
 	});
 
-
-	// ─── Tool Result: escalate one tier on repeated failures ────────────────
-
 	pi.on("tool_result", async (event: any, ctx: any) => {
 		if (!routerEnabled || pinnedTier || planningActive) return;
-
 		if (event.isError) {
 			consecutiveErrors++;
 			if (consecutiveErrors >= 2) {
@@ -304,7 +339,7 @@ export default function (pi: ExtensionAPI) {
 				if (next) {
 					const switched = await setTier(next, `${consecutiveErrors} consecutive errors`, ctx);
 					if (switched) {
-						ctx.ui?.notify?.(`⬆️ Escalated → ${TIER_LABELS[next]} (${consecutiveErrors} errors)`, "warning");
+						ctx.ui?.notify?.(`⬆️ Escalated → ${tierLabel(next, profile)} (${consecutiveErrors} errors)`, "warning");
 						consecutiveErrors = 0;
 					}
 				}
@@ -314,10 +349,8 @@ export default function (pi: ExtensionAPI) {
 		}
 	});
 
-	// ─── /plan ────────────────────────────────────────────────────────────
-
 	pi.registerCommand("plan", {
-		description: "Plan a task on opus, then auto-downgrade to the assessed implementation floor. Usage: /plan <task>",
+		description: "Plan a task on the configured planner tier, then auto-downgrade to the assessed implementation floor. Usage: /plan <task>",
 		handler: async (args, ctx) => {
 			const task = (args || "").trim();
 			if (!task) {
@@ -329,93 +362,111 @@ export default function (pi: ExtensionAPI) {
 				return;
 			}
 
+			reloadConfig();
 			planningActive = true;
 			pinnedTier = null;
-			opusOneShot = false;
-			await setTier("opus", "planning", ctx);
-			ctx.ui?.setStatus?.("router", `${TIER_LABELS["opus"]} (planning)`);
-
-			pi.sendUserMessage([PLAN_FRAMING, "", `Task: ${task}`].join("\n"));
+			const switched = await setTier(profile.planningTier, "planning", ctx);
+			if (switched) ctx.ui?.setStatus?.("router", `${tierLabel(profile.planningTier, profile)} (planning)`);
+			pi.sendUserMessage([planFraming(profile), "", `Task: ${task}`].join("\n"));
 		},
 	});
 
-	// ─── Model slash pins ───────────────────────────────────────────────────
-
-	function registerPin(command: Tier) {
+	function registerPin(command: FloorTier) {
 		pi.registerCommand(command, {
-			description: `Pin to ${TIER_LABELS[command]} (sticky — /router auto to resume)`,
+			description: `Pin to ${command} tier (${tierLabel(command, profile)}) — sticky until /router auto`,
 			handler: async (_args, ctx) => {
 				pinnedTier = command;
-				opusOneShot = false;
 				await setTier(command, `manual /${command}`, ctx);
-				ctx.ui.notify(`🎯 Pinned to ${TIER_LABELS[command]} — auto-routing paused (/router auto to resume)`, "info");
+				ctx.ui.notify(`🎯 Pinned to ${tierLabel(command, profile)} — auto-routing paused (/router auto to resume)`, "info");
 			},
 		});
 	}
-	registerPin("nova");
-	registerPin("haiku");
-	registerPin("sonnet");
-
-	// ─── /opus — one-shot spike ──────────────────────────────────────────────
-
-	pi.registerCommand("opus", {
-		description: "One-shot opus spike: next turn runs on opus, then back to floor. Usage: /opus [prompt]",
-		handler: async (args, ctx) => {
-			opusOneShot = true;
-			const task = (args || "").trim();
-			if (task) {
-				if (!ctx.isIdle()) {
-					ctx.ui.notify("Agent is busy. Wait for the current task to finish.", "warning");
-					opusOneShot = false;
-					return;
-				}
-				ctx.ui.notify(`🎭 One-shot opus — this turn only, then back to ${TIER_LABELS[restingTier()]}`, "info");
-				pi.sendUserMessage(task);
-			} else {
-				ctx.ui.notify(
-					`🎭 One-shot opus armed — your next prompt runs on opus, then back to ${TIER_LABELS[restingTier()]}`,
-					"info",
-				);
-			}
-		},
-	});
-
-	// ─── /router control ─────────────────────────────────────────────────────
+	registerPin("fast");
+	registerPin("balanced");
+	registerPin("strong");
 
 	pi.registerCommand("router", {
-		description: "Model router controls. Usage: /router [status|on|off|escalate|floor <name>|auto|log|reset]",
+		description: "Model router controls. Usage: /router [status|profile <name>|profiles|validate|on|off|escalate|floor <name>|auto|log|reset|sync-agents]",
 		handler: async (args, ctx) => {
-			const parts = (args || "").trim().split(/\s+/);
+			const parts = (args || "").trim().split(/\s+/).filter(Boolean);
 			const subcommand = parts[0]?.toLowerCase() || "status";
+			reloadConfig();
 
 			switch (subcommand) {
 				case "status": {
 					const mode = planningActive
-						? "planning (opus)"
-						: opusOneShot
-							? "opus one-shot armed"
-							: pinnedTier
-								? `pinned (${TIER_LABELS[pinnedTier]})`
-								: routerEnabled
-									? "auto"
-									: "paused";
+						? "planning"
+						: pinnedTier
+							? `pinned (${tierLabel(pinnedTier, profile)})`
+							: routerEnabled
+								? "auto"
+								: "paused";
 					const lines = [
 						`🔀 **Model Router**`,
 						``,
-						`   Mode:   ${mode}`,
-						`   Tier:   ${TIER_LABELS[currentTier]}`,
-						`   Floor:  ${TIER_LABELS[floorTier]}`,
-						`   Cost:   ${TIER_COST_HINT[currentTier]}`,
-						`   Errors: ${consecutiveErrors} consecutive`,
-						`   Routes: ${sessionRouteLog.length} this session`,
+						`   Profile: ${config.activeProfile} (${profile.provider})`,
+						`   Mode:    ${mode}`,
+						`   Tier:    ${tierLabel(currentTier, profile)}`,
+						`   Floor:   ${tierLabel(floorTier, profile)}`,
+						`   Cost:    ${tierCost(currentTier, profile)}`,
+						`   Errors:  ${consecutiveErrors} consecutive`,
+						`   Routes:  ${sessionRouteLog.length} this session`,
 						``,
 						`   Tiers:`,
-						...TIER_ORDER.map(
-							(t) =>
-								`     ${t === currentTier ? "→" : " "} ${t.padEnd(6)} ${TIER_LABELS[t].padEnd(22)} ${TIER_COST_HINT[t]}`,
-						),
+						...TIER_ORDER.map((t) => {
+							const cfg = profile.tiers[t];
+							return `     ${t === currentTier ? "→" : " "} ${t.padEnd(8)} ${cfg.label.padEnd(24)} ${cfg.id}`;
+						}),
 					];
 					ctx.ui.notify(lines.join("\n"), "info");
+					break;
+				}
+
+				case "profiles":
+					ctx.ui.notify(`Profiles: ${Object.keys(config.profiles).join(", ")}\nActive: ${config.activeProfile}`, "info");
+					break;
+
+				case "profile": {
+					const nextProfile = parts[1];
+					if (!nextProfile) {
+						ctx.ui.notify(`Active profile: ${config.activeProfile}. Available: ${Object.keys(config.profiles).join(", ")}`, "info");
+						return;
+					}
+					if (!config.profiles[nextProfile]) {
+						ctx.ui.notify(`Unknown profile '${nextProfile}'. Available: ${Object.keys(config.profiles).join(", ")}`, "error");
+						return;
+					}
+					const previousProfile = config.activeProfile;
+					config.activeProfile = nextProfile;
+					const errors = validationErrors(ctx, config, false);
+					if (errors.length > 0) {
+						config.activeProfile = previousProfile;
+						ctx.ui.notify(`Cannot switch to '${nextProfile}':\n${errors.map((e) => `  - ${e}`).join("\n")}`, "error");
+						return;
+					}
+					saveConfig(config);
+					reloadConfig();
+					floorTier = profile.defaultFloor;
+					pinnedTier = null;
+					planningActive = false;
+					const changed = syncActiveTierAgents(nextProfile);
+					await setTier(floorTier, `profile ${nextProfile}`, ctx);
+					ctx.ui.notify(`✅ Router profile → ${nextProfile}. Synced tier agents${changed.length ? `: ${changed.join(", ")}` : ""}. Restart Pi to refresh the subagent tool description.`, "info");
+					break;
+				}
+
+				case "validate": {
+					const validateAll = parts[1]?.toLowerCase() === "all";
+					const errors = validationErrors(ctx, config, validateAll);
+					const scope = validateAll ? "all profiles" : config.activeProfile;
+					if (errors.length === 0) ctx.ui.notify(`✅ Router config valid (${scope})`, "success");
+					else ctx.ui.notify(`❌ Router config issues (${scope}):\n${errors.map((e) => `  - ${e}`).join("\n")}`, "error");
+					break;
+				}
+
+				case "sync-agents": {
+					const changed = syncActiveTierAgents(config.activeProfile);
+					ctx.ui.notify(`Synced ${config.activeProfile} tier agents${changed.length ? `: ${changed.join(", ")}` : " (no changes)"}`, "info");
 					break;
 				}
 
@@ -433,37 +484,35 @@ export default function (pi: ExtensionAPI) {
 				case "escalate": {
 					const next = nextTier(currentTier);
 					if (!next) {
-						ctx.ui.notify("Already at highest tier (opus)", "warning");
+						ctx.ui.notify("Already at highest tier (planner)", "warning");
 						return;
 					}
 					pinnedTier = next;
-					opusOneShot = false;
 					await setTier(next, "manual /router escalate", ctx);
-					ctx.ui.notify(`⬆️ ${TIER_LABELS[next]} — auto-routing paused (/router auto to resume)`, "info");
+					ctx.ui.notify(`⬆️ ${tierLabel(next, profile)} — auto-routing paused (/router auto to resume)`, "info");
 					break;
 				}
 
 				case "floor": {
-					const tierName = parts[1]?.toLowerCase() as Tier;
-					if (!FLOOR_CHOICES.includes(tierName)) {
+					const tierName = parts[1]?.toLowerCase();
+					if (!tierName || !isFloorTier(tierName)) {
 						ctx.ui.notify(`Floor must be one of: ${FLOOR_CHOICES.join(", ")}`, "error");
 						return;
 					}
 					floorTier = tierName;
 					pinnedTier = null;
 					await setTier(tierName, "manual /router floor", ctx);
-					ctx.ui.notify(`🧱 Floor set to ${TIER_LABELS[tierName]} — auto-routing anchored here`, "info");
+					ctx.ui.notify(`🧱 Floor set to ${tierLabel(tierName, profile)} — auto-routing anchored here`, "info");
 					break;
 				}
 
 				case "auto":
 					pinnedTier = null;
-					opusOneShot = false;
 					planningActive = false;
 					routerEnabled = true;
-					floorTier = DEFAULT_FLOOR;
-					await setTier(DEFAULT_FLOOR, "manual /router auto", ctx);
-					ctx.ui.notify(`🔀 Auto-routing resumed — floor ${TIER_LABELS[DEFAULT_FLOOR]}`, "info");
+					floorTier = profile.defaultFloor;
+					await setTier(floorTier, "manual /router auto", ctx);
+					ctx.ui.notify(`🔀 Auto-routing resumed — floor ${tierLabel(floorTier, profile)}`, "info");
 					break;
 
 				case "log": {
@@ -471,111 +520,54 @@ export default function (pi: ExtensionAPI) {
 						ctx.ui.notify("No routing decisions this session.", "info");
 						return;
 					}
-					const lines = sessionRouteLog.map(
-						(r) => `  ${r.time}  ${TIER_LABELS[r.from]} → ${TIER_LABELS[r.to]}  (${r.reason})`,
-					);
+					const lines = sessionRouteLog.map((r) => `  ${r.time}  ${tierLabel(r.from, profile)} → ${tierLabel(r.to, profile)}  (${r.reason})`);
 					ctx.ui.notify(`📋 Routing log:\n${lines.join("\n")}`, "info");
 					break;
 				}
 
 				case "reset":
 					pinnedTier = null;
-					opusOneShot = false;
 					planningActive = false;
 					consecutiveErrors = 0;
-					floorTier = DEFAULT_FLOOR;
-					await setTier(DEFAULT_FLOOR, "manual /router reset", ctx);
-					ctx.ui.notify(`🔄 Reset — floor ${TIER_LABELS[DEFAULT_FLOOR]}, auto-routing on`, "info");
+					routerEnabled = true;
+					floorTier = profile.defaultFloor;
+					await setTier(floorTier, "manual /router reset", ctx);
+					ctx.ui.notify(`🔄 Reset — floor ${tierLabel(floorTier, profile)}, auto-routing on`, "info");
 					break;
 
 				default:
-					ctx.ui.notify("Usage: /router [status|on|off|escalate|floor <name>|auto|log|reset]", "info");
+					ctx.ui.notify("Usage: /router [status|profile <name>|profiles|validate|on|off|escalate|floor <fast|balanced|strong>|auto|log|reset|sync-agents]", "info");
 			}
 		},
 	});
 
-	// ─── /routes — reference ──────────────────────────────────────────────────
-
 	pi.registerCommand("routes", {
-		description: "Show all router commands and the routing model",
+		description: "Show router commands and tier map",
 		handler: async (_args, ctx) => {
-			const mode = planningActive
-				? "planning"
-				: opusOneShot
-					? "opus one-shot armed"
-					: pinnedTier
-						? `pinned (${TIER_LABELS[pinnedTier]})`
-						: routerEnabled
-							? "auto"
-							: "paused";
+			reloadConfig();
 			const help = [
 				`🔀 **Model Router — Command Reference**`,
 				``,
-				`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`,
-				`  PLANNING`,
-				`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`,
-				`  /plan <task>      Plan on opus → set floor → downgrade & resume`,
+				`Profile: ${config.activeProfile} (${profile.provider})`,
 				``,
-				`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`,
-				`  MODEL PINS (sticky until /router auto)`,
-				`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`,
-				`  /nova             Pin to Nova Micro`,
-				`  /haiku            Pin to Claude Haiku 4.5`,
-				`  /sonnet           Pin to Claude Sonnet 5`,
-				`  /router escalate  Move up one tier`,
+				`/plan <task>        Plan on ${tierLabel(profile.planningTier, profile)} → set floor → downgrade`,
+				`/fast               Pin fast tier`,
+				`/balanced           Pin balanced tier`,
+				`/strong             Pin strong tier`,
+				`/router status      Current mode, tier, floor, profile`,
+				`/router profile X   Switch profile and sync active tier agents`,
+				`/router validate    Check configured models exist`,
+				`/router floor X     Set floor to fast|balanced|strong`,
+				`/router auto        Clear pin and return to default floor`,
+				`/router escalate    Move up one tier`,
+				`/router log         Routing decisions this session`,
 				``,
-				`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`,
-				`  ONE-SHOT`,
-				`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`,
-				`  /opus [prompt]    Run one turn on opus, then back to the floor`,
+				`Tiers:`,
+				...TIER_ORDER.map((t) => `  ${t.padEnd(8)} ${profile.tiers[t].label} — ${profile.tiers[t].id}`),
 				``,
-				`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`,
-				`  ROUTER`,
-				`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`,
-				`  /router status    Current mode, tier, floor, cost`,
-				`  /router escalate  Move up one tier (sticky)`,
-				`  /router floor X   Set floor to nova|haiku|sonnet`,
-				`  /router auto      Clear pin + floor, back to default`,
-				`  /router log       Routing decisions this session`,
-				`  /router on|off    Enable / pause routing`,
-				`  /router reset     Reset floor to default, auto on`,
-				``,
-				`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`,
-				`  TIER MAP`,
-				`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`,
-				`  nova     ⚡ Nova Micro         $0.035/$0.14 (cached: ~$0.004/M)`,
-				`  haiku    🧠 Claude Haiku 4.5  $0.80/$4.00  (cached: $0.08/M)`,
-				`  sonnet   🎵 Claude Sonnet 5   $3.00/$15.00 (cached: $0.30/M)`,
-				`  opus     🎭 Claude Opus 4.8   $15.00/$75.00 (cached: $1.50/M)`,
-				``,
-				`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`,
-				`  HOW ROUTING WORKS`,
-				`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`,
-				`  • The FLOOR is the base tier for the current task. Every`,
-				`    prompt runs at the floor — clarifying questions can't`,
-				`    downgrade you mid-task.`,
-				`  • /plan lets opus assess the work and SET the floor, then`,
-				`    drops to it automatically.`,
-				`  • /opus is a ONE-SHOT spike — one turn, then back to the floor.`,
-				`  • /nova /haiku /sonnet /router escalate are STICKY pins`,
-				`    (until /router auto).`,
-				`  • 2 consecutive tool errors auto-escalate one tier (falls back`,
-				`    to floor next prompt).`,
-				``,
-				`  Default floor (no plan): ${TIER_LABELS[DEFAULT_FLOOR]}`,
-				`  Current: ${TIER_LABELS[currentTier]} | Floor: ${TIER_LABELS[floorTier]} | Mode: ${mode}`,
-				``,
-				`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`,
-				`  SUBAGENT DELEGATION (automatic after /plan)`,
-				`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`,
-				`  After /plan sets a floor, if opus suggested subagent tasks at or`,
-				`  above that floor, you get a one-key confirm dialog:`,
-				``,
-				`    Run 3 subagent tasks in parallel? [y/n]`,
-				``,
-				`  Confirm to run them all in parallel via the real subagent tool —`,
-				`  no copy/pasting commands. Decline to continue in the main session`,
-				`  alone. Tasks below the floor tier are filtered out automatically.`,
+				`Default floor: ${tierLabel(profile.defaultFloor, profile)}`,
+				`Planner:       ${tierLabel(profile.planningTier, profile)}`,
+				`Compaction:    ${profile.compactionTier ? tierLabel(profile.compactionTier, profile) : "default"}`,
 			];
 			ctx.ui.notify(help.join("\n"), "info");
 		},

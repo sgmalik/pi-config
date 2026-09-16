@@ -1,17 +1,13 @@
 default:
-  - oss-fast
-  - oss-strong
-  - hard
-  - opus
-  - scout
-  - code-reviewer
-  - architect
+  - fast
+  - balanced
+  - strong
+  - planner
 
 routing:
-  - oss-fast
-  - oss-strong
-  - hard
+  - fast
+  - balanced
 
 review:
-  - code-reviewer
-  - hard
+  - strong
+  - planner
