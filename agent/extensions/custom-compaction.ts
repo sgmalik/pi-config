@@ -1,13 +1,16 @@
 /**
  * Custom Compaction Extension
  *
- * Replaces the default compaction behavior with a full summary of the entire context.
- * Instead of keeping the last 20k tokens of conversation turns, this extension:
- * 1. Summarizes ALL messages (messagesToSummarize + turnPrefixMessages)
- * 2. Discards all old turns completely, keeping only the summary
+ * Customizes compaction summarization:
+ * 1. Summarizes messagesToSummarize + turnPrefixMessages (the split-turn straddle)
+ *    using AWS Bedrock Sonnet 5 instead of the default conversation model.
+ * 2. Reuses the boundary computed from `keepRecentTokens` (settings.json) for
+ *    which messages stay raw/kept — this extension does NOT change that boundary.
+ *    To shrink the raw-kept window, lower `keepRecentTokens` in settings.json.
  *
- * This example also demonstrates using a different model (AWS Bedrock Haiku) for summarization,
- * which can be cheaper/faster than the main conversation model.
+ * Sonnet is used rather than a cheaper/smaller model because the generated summary
+ * is the ONLY surviving record of everything before the cut point — a lossy summary
+ * here silently degrades every future turn with no way to recover the lost detail.
  *
  * Usage:
  *   pi --extension ~/.pi/agent/extensions/custom-compaction.ts
@@ -28,7 +31,7 @@ export default function (pi: ExtensionAPI) {
 		// Scan for the last compaction entry (built into the session format, type: "compaction")
 		for (const entry of entries) {
 			if (entry.type === "compaction" && entry.summary) {
-				const source = entry.fromHook ? "custom (Bedrock Haiku)" : "built-in";
+				const source = entry.fromHook ? "custom (Bedrock Sonnet 5)" : "built-in";
 				const tokensBefore = typeof entry.tokensBefore === "number" ? entry.tokensBefore.toLocaleString() : String(entry.tokensBefore);
 				lastCompaction = {
 					summary: entry.summary,
@@ -72,7 +75,7 @@ export default function (pi: ExtensionAPI) {
 		if (!ctx.hasUI) return;
 
 		const { compactionEntry, fromExtension } = event;
-		const source = fromExtension ? "custom (Bedrock Haiku)" : "built-in";
+		const source = fromExtension ? "custom (Bedrock Sonnet 5)" : "built-in";
 		const summaryLength = compactionEntry.summary.length;
 		const tokensBefore = compactionEntry.tokensBefore.toLocaleString();
 		const timestamp = new Date(compactionEntry.timestamp).toLocaleTimeString();
@@ -337,10 +340,11 @@ export default function (pi: ExtensionAPI) {
 		const { preparation, branchEntries: _, signal } = event;
 		const { messagesToSummarize, turnPrefixMessages, tokensBefore, firstKeptEntryId, previousSummary } = preparation;
 
-		// Use AWS Bedrock Haiku for summarization (cheaper/faster than most conversation models)
-		const model = ctx.modelRegistry.find("amazon-bedrock", "us.anthropic.claude-haiku-4-5-20251001-v1:0");
+		// Use AWS Bedrock Sonnet 5 for summarization — the summary is the only surviving
+		// record of everything before the cut point, so we don't skimp on quality here.
+		const model = ctx.modelRegistry.find("amazon-bedrock", "us.anthropic.claude-sonnet-5");
 		if (!model) {
-			ctx.ui.notify(`Could not find AWS Bedrock Haiku model, using default compaction`, "warning");
+			ctx.ui.notify(`Could not find AWS Bedrock Sonnet 5 model, using default compaction`, "warning");
 			return;
 		}
 
@@ -361,7 +365,7 @@ export default function (pi: ExtensionAPI) {
 		}
 
 		ctx.ui.notify(
-			`Custom compaction: summarizing ${allMessages.length} messages (${tokensBefore.toLocaleString()} tokens) with AWS Bedrock Haiku...`,
+			`Custom compaction: summarizing ${allMessages.length} messages (${tokensBefore.toLocaleString()} tokens) with AWS Bedrock Sonnet 5...`,
 			"info",
 		);
 
