@@ -135,6 +135,12 @@ interface ToolsState {
 	enabledTools: string[];
 }
 
+// Tools disabled by default on a brand-new session/branch with no prior
+// tools-config entry. Currently: Context7 doc lookups, which cost schema
+// tokens every turn and can inject large doc-snippet payloads into history
+// on top of that - opt in per-session via /tools when actually needed.
+const DEFAULT_DISABLED_TOOLS = new Set(["resolve-library-id", "query-docs"]);
+
 function isExtensionFile(name: string): boolean {
 	return (name.endsWith(".ts") || name.endsWith(".js")) && !name.startsWith(".");
 }
@@ -210,8 +216,10 @@ export default function toolsExtension(pi: ExtensionAPI) {
 			enabledTools = new Set(savedTools.filter((t: string) => allToolNames.includes(t)));
 			applyTools();
 		} else {
-			// No saved state - sync with currently active tools
-			enabledTools = new Set(pi.getActiveTools());
+			// No saved state - sync with currently active tools, minus defaults-off
+			enabledTools = new Set(pi.getActiveTools().filter((t) => !DEFAULT_DISABLED_TOOLS.has(t)));
+			applyTools();
+			persistState();
 		}
 	}
 
