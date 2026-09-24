@@ -9,23 +9,28 @@
  *   - Parallel: { tasks: [{ agent: "name", task: "..." }, ...] }
  *   - Chain: { chain: [{ agent: "name", task: "... {previous} ..." }, ...] }
  *
- * Uses JSON mode to capture structured output from subagents.
+ * Uses visible Herdr panes in the TUI, otherwise headless JSON processes.
  */
 
 import { spawn } from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { fileURLToPath } from "node:url";
 import type { AgentToolResult } from "@earendil-works/pi-agent-core";
 import type { Message } from "@earendil-works/pi-ai";
 import { StringEnum } from "@earendil-works/pi-ai";
-import { type ExtensionAPI, getMarkdownTheme, withFileMutationQueue } from "@earendil-works/pi-coding-agent";
+import { type ExtensionAPI, getAgentDir, getMarkdownTheme, withFileMutationQueue } from "@earendil-works/pi-coding-agent";
 import { Container, Markdown, Spacer, Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { type AgentConfig, type AgentScope, discoverAgents } from "./agents.ts";
+import { isHerdrAvailable } from "./herdr.ts";
+import { HerdrRunner } from "./herdr-runner.ts";
+import { appendToolArgs, resolveChildTools } from "./tool-policy.ts";
 
 const MAX_PARALLEL_TASKS = 8;
-const MAX_CONCURRENCY = 4;
+const HEADLESS_MAX_CONCURRENCY = 4;
+const CHILD_LIFECYCLE_EXTENSION = path.join(path.dirname(fileURLToPath(import.meta.url)), "child-lifecycle.ts");
 const COLLAPSED_ITEM_COUNT = 10;
 const PER_TASK_OUTPUT_CAP = 50 * 1024;
 
@@ -152,6 +157,7 @@ interface SingleResult {
 	stopReason?: string;
 	errorMessage?: string;
 	step?: number;
+	inspectPane?: boolean;
 }
 
 interface SubagentDetails {
@@ -269,6 +275,9 @@ async function runSingleAgent(
 	onUpdate: OnUpdateCallback | undefined,
 	makeDetails: (results: SingleResult[]) => SubagentDetails,
 	inheritedTools: string[],
+	herdrRunner: HerdrRunner | null,
+	parentModel: string | undefined,
+	parentThinking: string | undefined,
 ): Promise<SingleResult> {
 	const agent = agents.find((a) => a.name === agentName);
 
@@ -286,13 +295,18 @@ async function runSingleAgent(
 		};
 	}
 
-	const args: string[] = ["--mode", "json", "-p", "--no-session"];
-	if (agent.model) args.push("--model", agent.model);
-	const childTools = agent.tools && agent.tools.length > 0 ? agent.tools : inheritedTools;
-	if (childTools.length > 0) args.push("--tools", childTools.join(","));
+	const args: string[] = herdrRunner
+		? ["--no-session", "--tui-mode", "regular", "--extension", CHILD_LIFECYCLE_EXTENSION]
+		: ["--mode", "json", "-p", "--no-session"];
+	const childModel = agent.model ?? parentModel;
+	if (childModel) args.push("--model", childModel);
+	if (parentThinking) args.push("--thinking", parentThinking);
+	const childTools = resolveChildTools(inheritedTools, agent.tools);
+	appendToolArgs(args, childTools);
 
 	let tmpPromptDir: string | null = null;
 	let tmpPromptPath: string | null = null;
+	let retainArtifactDir = false;
 
 	const currentResult: SingleResult = {
 		agent: agentName,
@@ -326,8 +340,50 @@ async function runSingleAgent(
 		args.push(`Task: ${task}`);
 		let wasAborted = false;
 
+		const invocation = getPiInvocation(args);
+		if (herdrRunner) {
+			if (!tmpPromptDir) tmpPromptDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "pi-subagent-run-"));
+			try {
+				const artifact = await herdrRunner.run({
+					name: `subagent: ${agent.name}`,
+					cwd: cwd ?? defaultCwd,
+					command: invocation.command,
+					args: invocation.args,
+					env: {
+						PI_CODING_AGENT_DIR: getAgentDir(),
+						PATH: process.env.PATH ?? "",
+						...Object.fromEntries(Object.entries(process.env).filter(([key, value]) =>
+							value !== undefined && (/^AWS_/.test(key) || /(?:_API_KEY|_AUTH_TOKEN)$/.test(key)),
+						)) as Record<string, string>,
+					},
+					artifactDir: tmpPromptDir,
+					signal,
+					onProgress: (progress) => {
+						currentResult.messages = progress.messages;
+						if (progress.usage) currentResult.usage = progress.usage;
+						currentResult.model = progress.model ?? childModel;
+						emitUpdate();
+					},
+				});
+				currentResult.exitCode = artifact.exitCode;
+				currentResult.messages = artifact.messages ?? [];
+				if (artifact.usage) currentResult.usage = artifact.usage;
+				currentResult.model = artifact.model ?? childModel;
+				currentResult.stopReason = artifact.stopReason;
+				currentResult.inspectPane = true;
+				retainArtifactDir = true;
+				currentResult.errorMessage = artifact.errorMessage;
+			} catch (error) {
+				if (signal?.aborted) throw error;
+				currentResult.exitCode = 1;
+				currentResult.stopReason = "error";
+				currentResult.errorMessage = error instanceof Error ? error.message : String(error);
+			}
+			emitUpdate();
+			return currentResult;
+		}
+
 		const exitCode = await new Promise<number>((resolve) => {
-			const invocation = getPiInvocation(args);
 			const proc = spawn(invocation.command, invocation.args, {
 				cwd: cwd ?? defaultCwd,
 				shell: false,
@@ -409,15 +465,15 @@ async function runSingleAgent(
 		if (wasAborted) throw new Error("Subagent was aborted");
 		return currentResult;
 	} finally {
-		if (tmpPromptPath)
+		if (tmpPromptPath && !retainArtifactDir)
 			try {
 				fs.unlinkSync(tmpPromptPath);
 			} catch {
 				/* ignore */
 			}
-		if (tmpPromptDir)
+		if (tmpPromptDir && !retainArtifactDir)
 			try {
-				fs.rmdirSync(tmpPromptDir);
+				fs.rmSync(tmpPromptDir, { recursive: true, force: true });
 			} catch {
 				/* ignore */
 			}
@@ -454,6 +510,13 @@ const SubagentParams = Type.Object({
 });
 
 export default function (pi: ExtensionAPI) {
+	let herdrRunner = new HerdrRunner();
+	pi.on("session_start", () => {
+		herdrRunner.closeAll();
+		herdrRunner = new HerdrRunner();
+	});
+	pi.on("session_shutdown", () => herdrRunner.closeAll());
+
 	// Discover agents at registration time so the model knows what's available
 	const bootAgents = discoverAgents(process.cwd(), "user");
 	const agentList = bootAgents.agents
@@ -474,6 +537,9 @@ export default function (pi: ExtensionAPI) {
 
 		async execute(_toolCallId, params, signal, onUpdate, ctx) {
 			const inheritedTools = pi.getActiveTools().filter((tool) => tool !== "subagent");
+			const interactiveRunner = ctx.mode === "tui" && isHerdrAvailable() ? herdrRunner : null;
+			const parentModel = ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined;
+			const parentThinking = pi.getThinkingLevel();
 			const agentScope: AgentScope = params.agentScope ?? "user";
 			const discovery = discoverAgents(ctx.cwd, agentScope);
 			const agents = discovery.agents;
@@ -565,6 +631,9 @@ export default function (pi: ExtensionAPI) {
 						chainUpdate,
 						makeDetails("chain"),
 						inheritedTools,
+						interactiveRunner,
+						parentModel,
+						parentThinking,
 					);
 					results.push(result);
 
@@ -579,8 +648,12 @@ export default function (pi: ExtensionAPI) {
 					}
 					previousOutput = getFinalOutput(result.messages);
 				}
+				const retainedCount = results.filter((result) => result.inspectPane).length;
+				const inspectionHint = retainedCount > 0
+					? `\n\n${retainedCount} visible child pane${retainedCount === 1 ? " remains" : "s remain"} for inspection. Focus each and press Ctrl-D with an empty editor to close it.`
+					: "";
 				return {
-					content: [{ type: "text", text: getFinalOutput(results[results.length - 1].messages) || "(no output)" }],
+					content: [{ type: "text", text: `${getFinalOutput(results[results.length - 1].messages) || "(no output)"}${inspectionHint}` }],
 					details: makeDetails("chain")(results),
 				};
 			}
@@ -626,7 +699,8 @@ export default function (pi: ExtensionAPI) {
 					}
 				};
 
-				const results = await mapWithConcurrencyLimit(params.tasks, MAX_CONCURRENCY, async (t, index) => {
+				const concurrency = interactiveRunner ? interactiveRunner.maxChildren : HEADLESS_MAX_CONCURRENCY;
+				const results = await mapWithConcurrencyLimit(params.tasks, concurrency, async (t, index) => {
 					const result = await runSingleAgent(
 						ctx.cwd,
 						agents,
@@ -644,6 +718,9 @@ export default function (pi: ExtensionAPI) {
 						},
 						makeDetails("parallel"),
 						inheritedTools,
+						interactiveRunner,
+						parentModel,
+						parentThinking,
 					);
 					allResults[index] = result;
 					emitParallelUpdate();
@@ -656,7 +733,10 @@ export default function (pi: ExtensionAPI) {
 					const status = isFailedResult(r)
 						? `failed${r.stopReason && r.stopReason !== "end" ? ` (${r.stopReason})` : ""}`
 						: "completed";
-					return `### [${r.agent}] ${status}\n\n${output}`;
+					const inspectionHint = r.inspectPane
+						? "\n\nVisible child pane retained for inspection. Focus it and press Ctrl-D with an empty editor to close it."
+						: "";
+					return `### [${r.agent}] ${status}\n\n${output}${inspectionHint}`;
 				});
 				return {
 					content: [
@@ -681,6 +761,9 @@ export default function (pi: ExtensionAPI) {
 					onUpdate,
 					makeDetails("single"),
 					inheritedTools,
+					interactiveRunner,
+					parentModel,
+					parentThinking,
 				);
 				const isError = isFailedResult(result);
 				if (isError) {
@@ -691,8 +774,11 @@ export default function (pi: ExtensionAPI) {
 						isError: true,
 					};
 				}
+				const inspectionHint = result.inspectPane
+					? "\n\nVisible child pane retained for inspection. Focus it and press Ctrl-D with an empty editor to close it."
+					: "";
 				return {
-					content: [{ type: "text", text: getFinalOutput(result.messages) || "(no output)" }],
+					content: [{ type: "text", text: `${getFinalOutput(result.messages) || "(no output)"}${inspectionHint}` }],
 					details: makeDetails("single")([result]),
 				};
 			}

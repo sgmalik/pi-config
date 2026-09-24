@@ -55,15 +55,17 @@ function loadAgentsFromDir(dir: string, source: "user" | "project"): AgentConfig
 			continue;
 		}
 
-		const tools = frontmatter.tools
-			?.split(",")
-			.map((t: string) => t.trim())
-			.filter(Boolean);
+		const tools = Object.hasOwn(frontmatter, "tools")
+			? (frontmatter.tools ?? "")
+					.split(",")
+					.map((t: string) => t.trim())
+					.filter(Boolean)
+			: undefined;
 
 		agents.push({
 			name: frontmatter.name,
 			description: frontmatter.description,
-			tools: tools && tools.length > 0 ? tools : undefined,
+			tools,
 			model: frontmatter.model,
 			systemPrompt: body,
 			source,

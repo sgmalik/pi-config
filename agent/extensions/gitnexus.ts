@@ -53,10 +53,6 @@ export default function (pi: ExtensionAPI) {
 			"when you need to understand how a feature or concept flows end-to-end through the codebase.",
 		promptSnippet:
 			"Search the code knowledge graph for execution flows related to a concept",
-		promptGuidelines: [
-			"Use gitnexus_query to understand how a feature flows through the codebase before editing it.",
-			"Use gitnexus_query with a concept name (e.g. 'skill execution', 'audit log write') rather than a symbol name — it searches flows, not just identifiers.",
-		],
 		parameters: Type.Object({
 			query: Type.String({
 				description: "Concept or feature to search for (e.g. 'skill execution', 'audit log write', 'LLM provider call')",
@@ -100,11 +96,6 @@ export default function (pi: ExtensionAPI) {
 			"Reports direct callers, affected execution flows, and risk level (LOW / MEDIUM / HIGH / CRITICAL).",
 		promptSnippet:
 			"Blast radius analysis — what breaks if you change a symbol",
-		promptGuidelines: [
-			"Use gitnexus_impact before modifying any function, method, or type to understand the blast radius.",
-			"If gitnexus_impact returns HIGH or CRITICAL risk, report this to the user before proceeding.",
-			"Pass file to disambiguate common symbol names (e.g. 'handleConn' exists in multiple files).",
-		],
 		parameters: Type.Object({
 			target: Type.String({
 				description: "Symbol name to analyse (function, method, type, or interface)",
@@ -156,9 +147,6 @@ export default function (pi: ExtensionAPI) {
 			"symbol before refactoring or extending it.",
 		promptSnippet:
 			"360° view of a symbol — callers, callees, execution flows",
-		promptGuidelines: [
-			"Use gitnexus_context to get full caller/callee/flow context for a specific symbol before refactoring.",
-		],
 		parameters: Type.Object({
 			name: Type.String({
 				description: "Symbol name (function, method, type, or interface)",
@@ -202,9 +190,6 @@ export default function (pi: ExtensionAPI) {
 			"and to surface any unintended blast radius.",
 		promptSnippet:
 			"Map git diff to affected symbols and execution flows",
-		promptGuidelines: [
-			"Use gitnexus_detect_changes before committing to verify changes only affect expected symbols.",
-		],
 		parameters: Type.Object({
 			scope: Type.Optional(Type.String({
 				description: "'unstaged' (default), 'staged', 'all', or 'compare'",

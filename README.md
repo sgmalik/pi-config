@@ -18,6 +18,7 @@ Personal configuration, extensions, agents, and themes for the [Pi coding agent]
 │   │   ├── custom-compaction.ts     # Custom context compaction
 │   │   ├── tool-counter.ts          # Token & cost footer
 │   │   ├── tools.ts                 # Tool selector
+│   │   ├── subagent/                # Synchronous headless/Herdr subagent runner
 │   │   ├── trigger-compact.ts       # Auto-compaction at token threshold
 │   │   └── notify.ts                # Terminal notifications
 │   ├── optional-extensions/         # Available but not auto-loaded
@@ -104,6 +105,13 @@ Extensions in `extensions/` are auto-loaded on startup.
 | **trigger-compact** | Auto-triggers compaction when context exceeds 150k tokens at agent end. |
 | **tool-counter** | Rich two-line footer: model + context meter, tokens in/out, cost, cwd with git branch, and tool call tally. |
 | **tools** | `/tools` — interactive tool selector to enable/disable tools. Persists across session reloads. |
+| **subagent** | Synchronous single/parallel/chain delegation. Inside Herdr, runs up to three visible child panes beside the parent (four panes total) and queues overflow; elsewhere children remain headless. Child tools are restricted to the parent/agent allowlist intersection. |
+
+Herdr mode activates automatically in interactive Pi inside Herdr; no package installation or extra command is required. Single, parallel, and chain calls keep their existing wait-for-results behavior. Starting from a single pane, the layout splits down, then each row right, into parent + three children. The current tab never gains a fifth pane; existing unrelated panes reduce available capacity and are never reused or closed. Extra tasks wait for space (an already-full tab with no owned children returns an error).
+
+After returning its structured result/usage, each child pane remains open for inspection. The parent result tells you to focus the child and press `Ctrl-D` with an empty Pi editor; this exits the child and then closes its extension-owned Herdr pane. Until then it occupies one of the three child slots, so queued work waits. Closing a child manually reports failure; cancelling the parent closes only extension-owned panes. Children remain ephemeral: this does not add async delegation or resume controls. Approval-gate is unchanged; child tools can only narrow the parent's allowlist, including an explicit empty list.
+
+Restart Pi to load changes. Verified with Pi 0.87.1 / Node 22.19.0; the child lifecycle uses `agent_settled`. Run tests with `node --experimental-transform-types --test agent/extensions/subagent/subagent.test.ts`.
 
 ### System
 
