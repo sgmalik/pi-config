@@ -1,0 +1,65 @@
+{
+  "activeProfile": "codex",
+  "profiles": {
+    "codex": {
+      "provider": "openai-codex",
+      "defaultFloor": "balanced",
+      "planningTier": "planner",
+      "compactionTier": "balanced",
+      "tiers": {
+        "fast": {
+          "id": "gpt-5.6-luna",
+          "label": "🌙 GPT-5.6 Luna",
+          "cost": "$0.20/$1.20 per M"
+        },
+        "balanced": {
+          "id": "gpt-5.6-terra",
+          "label": "🌍 GPT-5.6 Terra",
+          "cost": "$2.00/$12.00 per M"
+        },
+        "strong": {
+          "id": "gpt-5.6-sol",
+          "label": "☀️ GPT-5.6 Sol",
+          "cost": "$5.00/$30.00 per M"
+        },
+        "planner": {
+          "id": "gpt-6-astra",
+          "label": "✨ GPT-6 Astra",
+          "cost": "see Codex account pricing"
+        }
+      }
+    },
+    "bedrock": {
+      "provider": "amazon-bedrock",
+      "defaultFloor": "balanced",
+      "planningTier": "planner",
+      "compactionTier": "balanced",
+      "tiers": {
+        "fast": {
+          "id": "arn:aws:bedrock:us-east-1:472598590798:application-inference-profile/1xd0f80p0sob",
+          "label": "🧠 Claude Haiku 4.5",
+          "cost": "$0.80/$4.00 per M (cached: $0.08/M)",
+          "overrides": { "reasoning": true, "name": "claude-haiku-4-5" }
+        },
+        "balanced": {
+          "id": "arn:aws:bedrock:us-east-1:472598590798:application-inference-profile/ov5vdsffeznl",
+          "label": "🎵 Claude Sonnet 5",
+          "cost": "$3.00/$15.00 per M (cached: $0.30/M)",
+          "overrides": { "reasoning": true, "name": "claude-sonnet-4-6" }
+        },
+        "strong": {
+          "id": "arn:aws:bedrock:us-east-1:472598590798:application-inference-profile/ov5vdsffeznl",
+          "label": "🎵 Claude Sonnet 5",
+          "cost": "$3.00/$15.00 per M (cached: $0.30/M)",
+          "overrides": { "reasoning": true, "name": "claude-sonnet-4-6" }
+        },
+        "planner": {
+          "id": "arn:aws:bedrock:us-east-1:472598590798:application-inference-profile/xsahe8qo68zv",
+          "label": "🎭 Claude Opus",
+          "cost": "$15.00/$75.00 per M (cached: $1.50/M)",
+          "overrides": { "reasoning": true, "name": "claude-opus-4-8" }
+        }
+      }
+    }
+  }
+}

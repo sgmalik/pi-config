@@ -19,9 +19,3 @@
 - Use `ffgrep` (contents) and `fffind` (paths) for all searches, in-repo or outside. Not raw bash grep/find.
 - After 1-2 results, read the top match.
 
-## GitNexus
-
-- MUST `gitnexus_impact` before editing any symbol. Report blast radius.
-- MUST `gitnexus_detect_changes` before committing.
-- WARN user on HIGH/CRITICAL risk before proceeding.
-- Prefer `gitnexus_query` over grepping for unfamiliar code.

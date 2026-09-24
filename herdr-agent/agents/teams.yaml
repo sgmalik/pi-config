@@ -1,0 +1,13 @@
+default:
+  - fast
+  - balanced
+  - strong
+  - planner
+
+routing:
+  - fast
+  - balanced
+
+review:
+  - strong
+  - planner

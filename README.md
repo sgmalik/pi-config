@@ -280,4 +280,4 @@ Extension-registered shortcuts (in addition to Pi built-ins):
 
 ## Personal Guidelines
 
-See `agent/AGENTS.md` for personal coding standards, search techniques, GitNexus workflow, and code quality requirements.
+Global defaults live in `agent/APPEND_SYSTEM.md`. Project-specific guidance should live in each repo's `AGENTS.md`; use `sample-repo/AGENTS.md` as a copyable template for git-backed projects that should opt into GitNexus.
